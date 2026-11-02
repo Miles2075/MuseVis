@@ -1209,6 +1209,10 @@ export default function App() {
 
   const togglePlay = async () => {
     lastLocalControlTimeRef.current = Date.now();
+    if (currentTrack.id === DEFAULT_IDLE_TRACK.id) {
+      setActiveModal('sync');
+      return;
+    }
     if (currentTrack.platform === 'Spotify') {
       const action = spotifyIsPlaying ? 'pause' : 'play';
       const ok = await controlSpotifyRemotePlayer(action, {
@@ -1225,10 +1229,6 @@ export default function App() {
       synthEngine.stop();
       setIsPlaying(false);
     } else {
-      if (currentTrack.id === DEFAULT_IDLE_TRACK.id) {
-        setActiveModal('sync');
-        return;
-      }
       synthEngine.start(currentTrack);
       if (progress > 1 && progress < currentTrack.duration - 2) synthEngine.seek(progress);
       synthEngine.setVolume(isMuted ? 0 : volume);
@@ -1251,8 +1251,8 @@ export default function App() {
       if (forcePlay) {
         let uri = target.spotifyUri;
         if (!uri) uri = (await resolveSpotifyTrackUri(target.title, target.artist, target.spotifyUri)) || undefined;
+        if (reqId !== trackRequestIdRef.current) return;
         if (uri) {
-          if (reqId !== trackRequestIdRef.current) return;
           const ok = await controlSpotifyRemotePlayer('play', { trackUri: uri });
           if (reqId !== trackRequestIdRef.current) return;
           setSpotifyIsPlaying(Boolean(ok));
@@ -1265,6 +1265,7 @@ export default function App() {
       return;
     }
 
+    if (spotifyIsPlaying) void controlSpotifyRemotePlayer('pause');
     setSpotifyIsPlaying(false);
     if (forcePlay || isPlaying) {
       synthEngine.unlock();
@@ -1379,6 +1380,8 @@ export default function App() {
     }
     const objectUrl = URL.createObjectURL(file);
     synthEngine.stop();
+    if (spotifyIsPlaying) void controlSpotifyRemotePlayer('pause');
+    setIsSearching(false);
     tracks.forEach((track) => {
       if (track.platform === 'MuseVis Studio' && track.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(track.previewUrl);
     });
@@ -1581,7 +1584,7 @@ export default function App() {
                 onClick={togglePlay}
                 className="px-5 py-2 rounded-lg text-sm font-semibold text-black bg-white"
               >
-                {(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play'}
+                {currentTrack.id === DEFAULT_IDLE_TRACK.id ? 'Choose track' : (currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play'}
               </button>
             </div>
           </div>
@@ -2390,7 +2393,7 @@ export default function App() {
                 ) : (
                   <Play className="w-3.5 h-3.5 fill-current" />
                 )}
-                <span>{(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play Audio'}</span>
+                <span>{currentTrack.id === DEFAULT_IDLE_TRACK.id ? 'Choose Track' : (currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play Audio'}</span>
               </button>
               <button
                 onClick={handleNextTrack}
