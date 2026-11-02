@@ -443,8 +443,26 @@ export async function searchSpotifyCatalog(
     token && token !== 'server_managed_session'
       ? token
       : localStorage.getItem('musevis_spotify_token') || undefined;
-  if (!cleanToken) return [];
+  const headers = cleanToken && cleanToken !== 'server_managed_session'
+    ? { Authorization: 'Bearer ' + cleanToken }
+    : {};
 
+  // Prefer the authenticated Spotify proxy so server-managed sessions work too.
+  try {
+    const { ok, isJson, data } = await safeJsonFetch<{ tracks?: any[] }>(
+      '/api/spotify/search?q=' + encodeURIComponent(trimmed),
+      { headers }
+    );
+    if (isJson && ok && Array.isArray(data?.tracks)) {
+      return data.tracks
+        .filter((track: any) => track && track.id && track.name)
+        .map((track: any, idx: number) => mapSpotifyTrackToMusicTrack(track, idx));
+    }
+  } catch {
+    // Try the browser token below.
+  }
+
+  if (!cleanToken || cleanToken === 'server_managed_session') return [];
   try {
     const res = await fetch(
       'https://api.spotify.com/v1/search?q=' + encodeURIComponent(trimmed) + '&type=track&limit=14',
