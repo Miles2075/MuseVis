@@ -929,9 +929,7 @@ export default function App() {
       ];
       setTracks(combined.length > 0 ? combined : [liveTrack]);
       setCurrentTrackIndex(0);
-      if (typeof data.currentlyPlaying.progress_ms === 'number') {
-        setProgress(Math.floor(data.currentlyPlaying.progress_ms / 1000));
-      }
+      setSpotifyIsPlaying(Boolean(data.currentlyPlaying.is_playing));
     } else if (resolvedInitialTracks.length > 0) {
       setTracks(resolvedInitialTracks);
       setCurrentTrackIndex(0);
@@ -1478,6 +1476,14 @@ export default function App() {
           >
             Import Audio
           </button>
+          {spotifyConnected && (
+            <button
+              onClick={() => syncTrackWithSpotify(true)}
+              className="px-3 py-2 text-xs font-semibold rounded-lg transition-colors bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200"
+            >
+              Sync Now Playing
+            </button>
+          )}
           <button
             onClick={handleConnectSpotify}
             className="px-4 py-2 text-xs font-semibold rounded-lg transition-colors bg-white/5 hover:bg-white/10 text-slate-300"
@@ -1489,6 +1495,11 @@ export default function App() {
 
       {/* Global Spectral Frequency Visualizer Overlay */}
       <SpectralVisualizer palette={activePalette} className="fixed inset-0 z-10 opacity-30 pointer-events-none" />
+
+      {/* Source-mode indicator */}
+      <div className="fixed top-[88px] right-6 z-20 rounded-full border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-wider text-slate-300">
+        {currentTrack.platform === 'Spotify' ? 'Spotify · metadata & controls' : currentTrack.platform === 'MuseVis Studio' ? 'MuseVis Studio · local audio' : 'Ready for audio'}
+      </div>
 
       {/* Centered Track Information Box */}
       <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none flex flex-col items-center gap-4">
@@ -1556,7 +1567,7 @@ export default function App() {
                 onClick={togglePlay}
                 className="px-5 py-2 rounded-lg text-sm font-semibold text-black bg-white"
               >
-                {isPlaying ? 'Pause' : 'Play'}
+                {(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play'}
               </button>
             </div>
           </div>
@@ -1675,7 +1686,7 @@ export default function App() {
                               color: isCurrent ? '#000' : '#fff',
                             }}
                           >
-                            {isCurrent && isPlaying ? (
+                            {isCurrent && (currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? (
                               <Pause className="w-3 h-3 fill-current" />
                             ) : (
                               <Play className="w-3 h-3 fill-current" />
@@ -1928,7 +1939,7 @@ export default function App() {
                                 }}
                                 className="px-2.5 py-1 rounded bg-white text-black text-[11px] font-semibold hover:bg-slate-200 flex items-center gap-1 cursor-pointer"
                               >
-                                {isCurrent && isPlaying ? (
+                                {isCurrent && (currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? (
                                   <>
                                     <Pause className="w-3 h-3 fill-current" />
                                     <span>Pause</span>
@@ -2358,7 +2369,7 @@ export default function App() {
                   boxShadow: `0 0 18px -4px ${activePalette.primary}`,
                 }}
               >
-                {isPlaying ? (
+                {(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? (
                   <Pause className="w-3.5 h-3.5 fill-current" />
                 ) : (
                   <Play className="w-3.5 h-3.5 fill-current" />
