@@ -107,10 +107,7 @@ export const DEFAULT_IDLE_TRACK: MusicTrack = {
   coverUrl: '/assets/albums/cover_ethereal_fluid.svg',
   palette: PALETTE_PRESETS[0],
   chordProgression: CHORD_PROGRESSIONS[0],
-  lyrics: [
-    { time: 0, text: 'Connect Spotify or choose a playlist to start streaming' },
-    { time: 8, text: 'Real-time 3D fluid resonance awaits your music' },
-  ],
+  lyrics: undefined,
 };
 
 export function hashTrackToPalette(seed: string): TrackPalette {

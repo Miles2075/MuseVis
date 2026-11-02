@@ -152,42 +152,6 @@ export function mapSpotifyTrackToMusicTrack(spTrack: any, index = 0): MusicTrack
   const chordProgression = CHORD_PROGRESSIONS[absHash % CHORD_PROGRESSIONS.length];
   const coverUrl = spTrack?.album?.images?.[0]?.url || getAbstractPlaceholderCover(mood);
 
-  const POETIC_MOOD_VERSES: Record<MusicTrack['mood'], string[]> = {
-    Ethereal: [
-      'Raat ki khamoshi mein kho gaye',
-      'Sitaron ki roshni mein gunguna rahe',
-      'Tere khwabon mein hi hum ji rahe',
-      'Dhundli yaadein, dil mein bas gayi',
-      'Hawaon ke sang udne ka mann hai',
-      'Sukoon ki talaash mein hum gum hain',
-    ],
-    Kinetic: [
-      'Neon lights mein bhaage, jab shehar so gaya',
-      'Dil ki dhadkan tez, sapna mera ho gaya',
-      'Raftaar mein hum, masti mein choor',
-      'Manzil door hai, par hum majboor nahi',
-      'Aag lagi hai seene mein, jeetne ka junoon',
-      'Raste naye hain, aur hum taiyaar hain',
-    ],
-    Melancholic: [
-      'Purani yaadein, jaise baarish ki bundein',
-      'Alfaaz mere, tere bin hain adhoore',
-      'Tanhai ka aalam, dil mein hai chupa',
-      'Waqt ruk gaya, jaise main akela hua',
-      'Khamosh galiyon mein, teri parchayi hai',
-      'Yaadon ka karwaan, har pal yaad aayi hai',
-    ],
-    Euphoric: [
-      'Sunheri roshni, badalon ke paar',
-      'Khushi ka jashn, hai har taraf bahaar',
-      'Sapne sach hue, aaj dil khush hai',
-      'Zindagi ka ye pal, sabse anmol hai',
-      'Umeedon ke pankh, falak tak le jayenge',
-      'Aaj hum milke, naye geet gayenge',
-    ],
-  };
-
-  const step = Math.max(6, Math.floor(duration / 8));
 
   return {
     id,
@@ -218,39 +182,9 @@ export function isShortPreviewUrl(url?: string | null): boolean {
   );
 }
 
-function extractClientSaavnDownloadUrl(song: any): string | null {
-  const urls = song?.downloadUrl || song?.download_url;
-  if (!Array.isArray(urls) || urls.length === 0) return null;
-  const sorted = [...urls].reverse();
-  for (const item of sorted) {
-    const link = item?.url || item?.link;
-    if (typeof link === 'string' && link.startsWith('http')) {
-      return link.replace(/^http:\/\//i, 'https://');
-    }
-  }
-  return null;
-}
-
-function extractClientSaavnCover(song: any): string | null {
-  const images = song?.image;
-  if (Array.isArray(images) && images.length > 0) {
-    const last = images[images.length - 1];
-    const link = last?.url || last?.link;
-    if (typeof link === 'string' && link.startsWith('http')) {
-      return link.replace(/^http:\/\//i, 'https://');
-    }
-  }
-  return null;
-}
-
-const clientMediaCache = new Map<
-  string,
-  { previewUrl: string | null; coverUrl: string | null; duration?: number; isFullTrack: boolean }
->();
-
 export async function resolveTrackMedia(
-  title: string,
-  artist: string,
+  _title: string,
+  _artist: string,
   existingPreviewUrl?: string,
   existingCoverUrl?: string
 ): Promise<{
@@ -259,158 +193,11 @@ export async function resolveTrackMedia(
   duration?: number;
   isFullTrack?: boolean;
 }> {
-  const hasRealCover =
-    Boolean(existingCoverUrl) &&
-    !String(existingCoverUrl).startsWith('/assets/albums/');
-  const hasFullStream = Boolean(existingPreviewUrl) && !isShortPreviewUrl(existingPreviewUrl);
-
-  if (hasFullStream && hasRealCover) {
-    return {
-      previewUrl: existingPreviewUrl!,
-      coverUrl: existingCoverUrl!,
-      isFullTrack: true,
-    };
-  }
-
-  const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
-  const cleanTitle = decodeHtmlEntities(title)
-    .replace(/\s*\(.*?\)\s*/g, '')
-    .replace(/\s*\[.*?\]\s*/g, '')
-    .replace(/\s*-.*$/, '')
-    .trim();
-  const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
-
-  if (clientMediaCache.has(cacheKey)) {
-    const cached = clientMediaCache.get(cacheKey)!;
-    return {
-      previewUrl: cached.previewUrl || existingPreviewUrl || null,
-      coverUrl: hasRealCover ? existingCoverUrl! : cached.coverUrl,
-      duration: cached.duration,
-      isFullTrack: cached.isFullTrack,
-    };
-  }
-
-  // 1. Try server-side Full-Length Audio Stream Resolver (/api/audio/full-stream) with strict matching
-  try {
-    const params = new URLSearchParams({
-      title: cleanTitle,
-      artist: primaryArtist,
-    });
-    const { ok, isJson, data } = await safeJsonFetch<{
-      streamUrl?: string;
-      coverUrl?: string | null;
-      duration?: number;
-      isFullTrack?: boolean;
-    }>(`/api/audio/full-stream?${params.toString()}`);
-
-    if (isJson && ok && data?.streamUrl && data.isFullTrack) {
-      const result = {
-        previewUrl: data.streamUrl,
-        coverUrl: hasRealCover ? existingCoverUrl! : data.coverUrl || null,
-        duration: data.duration,
-        isFullTrack: true,
-      };
-      clientMediaCache.set(cacheKey, result);
-      return result;
-    }
-  } catch {
-    // Fall through to direct client full-track resolution
-  }
-
-  // 2. Direct client-side full-length stream resolution (Strict Title + Artist Verification Only)
-  const query = encodeURIComponent(`${cleanTitle} ${primaryArtist}`.trim());
-  const clientEndpoints = [
-    `https://saavn.sumit.co/api/search/songs?query=${query}&page=0&limit=10`,
-  ];
-
-  for (const endpoint of clientEndpoints) {
-    try {
-      const res = await fetch(endpoint);
-      if (res.ok) {
-        const json = await res.json();
-        const results: any[] =
-          json?.data?.results ||
-          json?.results ||
-          (Array.isArray(json?.data) ? json.data : []);
-        if (Array.isArray(results) && results.length > 0) {
-          // Strictly verify candidate title and artist — NEVER fall back to results[0]
-          const strictMatch = results.find((r) => {
-            const rName = decodeHtmlEntities(String(r?.name || r?.title || ''));
-            const rArtists = decodeHtmlEntities(
-              String(
-                r?.primaryArtists ||
-                  r?.artists?.primary?.map((a: any) => a.name).join(', ') ||
-                  r?.subtitle ||
-                  ''
-              )
-            );
-            const dur = Number(r?.duration || 0);
-            const lang = String(r?.language || '').toLowerCase();
-            return (
-              dur >= 60 &&
-              lang !== 'instrumental' &&
-              isStrictTrackMatch(rName, rArtists, cleanTitle, primaryArtist)
-            );
-          });
-
-          if (strictMatch) {
-            const fullUrl = extractClientSaavnDownloadUrl(strictMatch);
-            const dur = Number(strictMatch?.duration || 0);
-            if (fullUrl && dur >= 60) {
-              const cover = hasRealCover
-                ? existingCoverUrl!
-                : extractClientSaavnCover(strictMatch);
-              const result = {
-                previewUrl: fullUrl,
-                coverUrl: cover,
-                duration: Math.round(dur),
-                isFullTrack: true,
-              };
-              clientMediaCache.set(cacheKey, result);
-              return result;
-            }
-          }
-        }
-      }
-    } catch {
-      // Try next endpoint
-    }
-  }
-
-  // 3. Fallback to iTunes Search with strict title + artist verification
-  try {
-    const res = await fetch(`https://itunes.apple.com/search?term=${query}&entity=song&limit=6`);
-    if (res.ok) {
-      const data = await res.json();
-      const items: any[] = data?.results || [];
-      const matchedItunes = items.find((item) =>
-        isStrictTrackMatch(
-          String(item?.trackName || ''),
-          String(item?.artistName || ''),
-          cleanTitle,
-          primaryArtist
-        )
-      );
-      if (matchedItunes) {
-        const hiResCover = matchedItunes.artworkUrl100
-          ? String(matchedItunes.artworkUrl100).replace('100x100bb', '600x600bb')
-          : null;
-        return {
-          previewUrl: existingPreviewUrl || (matchedItunes.previewUrl as string) || null,
-          coverUrl: hasRealCover ? existingCoverUrl! : hiResCover,
-          duration: hasFullStream ? undefined : 30,
-          isFullTrack: hasFullStream,
-        };
-      }
-    }
-  } catch {
-    // Ignore
-  }
-
+  // Spotify metadata must never be paired with audio resolved from unrelated third-party catalogs.
   return {
     previewUrl: existingPreviewUrl || null,
-    coverUrl: hasRealCover ? existingCoverUrl! : null,
-    isFullTrack: hasFullStream,
+    coverUrl: existingCoverUrl || null,
+    isFullTrack: false,
   };
 }
 
@@ -459,10 +246,6 @@ export function parseLrcLyrics(lrcText: string): LyricLine[] {
   }
 
   const sorted = parsed.sort((a, b) => a.time - b.time);
-  // Anchor the very first lyric line at 0:00 so real lyrics are displayed immediately from the start of the song
-  if (sorted.length > 0 && sorted[0].time > 0) {
-    sorted[0] = { ...sorted[0], time: 0 };
-  }
   return sorted;
 }
 
@@ -474,154 +257,44 @@ export async function fetchLyricsForSpotifyTrack(
   durationSec = 200
 ): Promise<LyricLine[] | null> {
   try {
-    const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
     const cleanTitle = decodeHtmlEntities(title)
       .replace(/\s*\(.*?\)\s*/g, '')
       .replace(/\s*\[.*?\]\s*/g, '')
-      .replace(/\s*-\s*(?:slowed|ultra\s+slowed|remix|phonk|reverb|sped\s+up)\s*$/gi, '')
-      .replace(/\s*-.*$/, '')
       .trim();
-    if (!cleanTitle) return null;
+    const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
+    if (!cleanTitle || !primaryArtist) return null;
 
-    const targetDur = Math.max(60, Math.round(durationSec || 200));
-    const durBucket = Math.round(targetDur / 4) * 4;
-    const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}::${durBucket}`;
-    if (clientLyricsCache.has(cacheKey)) {
-      return clientLyricsCache.get(cacheKey)!;
-    }
+    const targetDuration = Math.max(30, Math.round(durationSec || 200));
+    const cacheKey = cleanTitle.toLowerCase() + '::' + primaryArtist.toLowerCase() + '::' + (Math.round(targetDuration / 4) * 4);
+    if (clientLyricsCache.has(cacheKey)) return clientLyricsCache.get(cacheKey)!;
 
-    const mapPlainToLyrics = (rawPlain: string): LyricLine[] | null => {
-      const plainLines = decodeHtmlEntities(rawPlain)
-        .split('\n')
-        .map((l: string) => l.trim())
-        .filter((l: string) => Boolean(l) && !isMetadataOrHeaderLine(l))
-        .slice(0, 44);
-      if (plainLines.length < 3) return null;
-      const step = Math.max(3.5, Math.floor(Math.max(90, targetDur - 10) / plainLines.length));
-      return plainLines.map((line: string, i: number) => ({
-        time: Math.round(i * step * 10) / 10,
-        text: line,
-      }));
-    };
+    const params = new URLSearchParams({ track_name: cleanTitle, artist_name: primaryArtist });
+    const response = await fetch('https://lrclib.net/api/search?' + params.toString());
+    if (!response.ok) return null;
+    const items: any[] = await response.json();
+    if (!Array.isArray(items)) return null;
 
-    // 1. Try server-side duration-matched LRC resolver first (/api/audio/lyrics)
-    try {
-      const serverParams = new URLSearchParams({
-        title: cleanTitle,
-        artist: primaryArtist,
-        duration: String(targetDur),
-      });
-      const { ok, isJson, data } = await safeJsonFetch<{
-        syncedLyrics?: string | null;
-        plainLyrics?: string | null;
-      }>(`/api/audio/lyrics?${serverParams.toString()}`);
-
-      if (isJson && ok && data) {
-        if (typeof data.syncedLyrics === 'string' && data.syncedLyrics.trim()) {
-          const parsed = parseLrcLyrics(data.syncedLyrics);
-          if (parsed.length >= 3) {
-            clientLyricsCache.set(cacheKey, parsed);
-            return parsed;
-          }
-        }
-        if (typeof data.plainLyrics === 'string' && data.plainLyrics.trim()) {
-          const mapped = mapPlainToLyrics(data.plainLyrics);
-          if (mapped) {
-            clientLyricsCache.set(cacheKey, mapped);
-            return mapped;
-          }
-        }
-      }
-    } catch {
-      // Fall through to direct LRCLIB search
-    }
-
-    // 2. Direct LRCLIB search with strict title + artist verification and title-match fallback
-    const searchParams = new URLSearchParams({
-      track_name: cleanTitle,
-      artist_name: primaryArtist,
+    const candidates = items.filter((item: any) => {
+      if (!item?.syncedLyrics || typeof item.syncedLyrics !== 'string') return false;
+      if (!isStrictTrackMatch(
+        String(item.trackName || ''),
+        String(item.artistName || ''),
+        cleanTitle,
+        primaryArtist
+      )) return false;
+      const candidateDuration = Number(item.duration || 0);
+      return !candidateDuration || Math.abs(candidateDuration - targetDuration) <= Math.max(10, targetDuration * 0.08);
     });
-    let res = await fetch(`https://lrclib.net/api/search?${searchParams.toString()}`);
-    let items: any[] = res.ok ? await res.json() : [];
 
-    if (!Array.isArray(items) || items.length === 0) {
-      const qParams = new URLSearchParams({
-        q: `${cleanTitle} ${primaryArtist}`,
-      });
-      res = await fetch(`https://lrclib.net/api/search?${qParams.toString()}`);
-      items = res.ok ? await res.json() : [];
-    }
-
-    // Helper to check for Devanagari script
-    const hasHindi = (text: string) => /[\u0900-\u097F]/.test(text);
-
-    let verifiedItems = Array.isArray(items)
-      ? items.filter((it: any) =>
-          isStrictTrackMatch(
-            String(it?.trackName || it?.name || ''),
-            String(it?.artistName || ''),
-            cleanTitle,
-            primaryArtist
-          )
-        )
-      : [];
-
-    if (verifiedItems.length === 0) {
-      const titleOnlyParams = new URLSearchParams({ q: cleanTitle });
-      const titleRes = await fetch(`https://lrclib.net/api/search?${titleOnlyParams.toString()}`);
-      const titleItems: any[] = titleRes.ok ? await titleRes.json() : [];
-      const combined = [...(Array.isArray(items) ? items : []), ...(Array.isArray(titleItems) ? titleItems : [])];
-      const normTarget = normalizeTrackToken(cleanTitle);
-      verifiedItems = combined.filter((it: any) => {
-        const cTitle = normalizeTrackToken(String(it?.trackName || it?.name || ''));
-        const rawLower = `${it?.trackName || ''} ${it?.artistName || ''}`.toLowerCase();
-        if (rawLower.includes('karaoke') || rawLower.includes('instrumental')) return false;
-        return (
-          Boolean(cTitle) &&
-          (cTitle === normTarget ||
-            (cTitle.includes(normTarget) && normTarget.length >= Math.max(4, Math.floor(cTitle.length * 0.6))) ||
-            (normTarget.includes(cTitle) && cTitle.length >= Math.max(4, Math.floor(normTarget.length * 0.6))))
-        );
-      });
-    }
-
-    if (verifiedItems.length === 0) return null;
-
-    // Sort synced lyric candidates by closest match to the actual audio stream duration
-    const syncedCandidates = verifiedItems.filter(
-      (it: any) => typeof it.syncedLyrics === 'string' && it.syncedLyrics.trim()
+    if (!candidates.length) return null;
+    candidates.sort((a: any, b: any) =>
+      Math.abs(Number(a.duration || targetDuration) - targetDuration) -
+      Math.abs(Number(b.duration || targetDuration) - targetDuration)
     );
-    if (syncedCandidates.length > 0) {
-      syncedCandidates.sort(
-        (a: any, b: any) => {
-          // Heuristic: prioritize Devanagari if present in lyrics (likely Hindi song)
-          const aHasHindi = hasHindi(a.syncedLyrics);
-          const bHasHindi = hasHindi(b.syncedLyrics);
-          if (aHasHindi && !bHasHindi) return -1;
-          if (!aHasHindi && bHasHindi) return 1;
-
-          return Math.abs(Number(a.duration || targetDur) - targetDur) -
-            Math.abs(Number(b.duration || targetDur) - targetDur);
-        }
-      );
-      const parsed = parseLrcLyrics(syncedCandidates[0].syncedLyrics);
-      if (parsed.length >= 3) {
-        clientLyricsCache.set(cacheKey, parsed);
-        return parsed;
-      }
-    }
-
-    const matchWithPlain = verifiedItems.find(
-      (it: any) => typeof it.plainLyrics === 'string' && it.plainLyrics.trim()
-    );
-    if (matchWithPlain?.plainLyrics) {
-      const mapped = mapPlainToLyrics(matchWithPlain.plainLyrics);
-      if (mapped) {
-        clientLyricsCache.set(cacheKey, mapped);
-        return mapped;
-      }
-    }
-    return null;
+    const parsed = parseLrcLyrics(candidates[0].syncedLyrics);
+    if (parsed.length < 3) return null;
+    clientLyricsCache.set(cacheKey, parsed);
+    return parsed;
   } catch {
     return null;
   }
@@ -700,133 +373,40 @@ export async function searchSpotifyCatalog(
     token && token !== 'server_managed_session'
       ? token
       : localStorage.getItem('musevis_spotify_token') || undefined;
+  const headers = cleanToken && cleanToken !== 'server_managed_session'
+    ? { Authorization: 'Bearer ' + cleanToken }
+    : {};
 
-  // 1. Try server-side Full-Track 320kbps Catalog Resolver (/api/audio/search) so every returned track has matched title, artist, 500x500 official cover art, and full 3-5 min audio stream
+  // Prefer the authenticated Spotify proxy so server-managed sessions work too.
   try {
-    const { ok, isJson, data } = await safeJsonFetch<{
-      tracks?: Array<{
-        id: string;
-        title: string;
-        artist: string;
-        album: string;
-        duration: number;
-        coverUrl: string | null;
-        streamUrl: string;
-        isFullTrack: boolean;
-      }>;
-    }>(`/api/audio/search?q=${encodeURIComponent(trimmed)}`);
-
-    if (isJson && ok && Array.isArray(data?.tracks) && data.tracks.length > 0) {
-      const mapped = data.tracks.map((item, idx) => {
-        const artistList = item.artist
-          .split(',')
-          .map((a) => ({ name: a.trim() }))
-          .filter((a) => a.name);
-        const track = mapSpotifyTrackToMusicTrack(
-          {
-            id: item.id || `full-${idx}`,
-            name: item.title,
-            artists: artistList.length > 0 ? artistList : [{ name: item.artist }],
-            album: {
-              name: item.album || item.title,
-              images: item.coverUrl ? [{ url: item.coverUrl }] : [],
-            },
-            duration_ms: item.duration * 1000,
-            preview_url: item.streamUrl,
-          },
-          idx
-        );
-
-        const primaryArtist = track.artist.split(',')[0].trim();
-        const cleanTitle = track.title
-          .replace(/\s*\(.*?\)\s*/g, '')
-          .replace(/\s*\[.*?\]\s*/g, '')
-          .replace(/\s*-.*$/, '')
-          .trim();
-        const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
-        clientMediaCache.set(cacheKey, {
-          previewUrl: item.streamUrl,
-          coverUrl: item.coverUrl,
-          duration: item.duration,
-          isFullTrack: true,
-        });
-
-        return track;
-      });
-      if (mapped.length > 0) {
-        const firstLyrics = await fetchLyricsForSpotifyTrack(
-          mapped[0].title,
-          mapped[0].artist,
-          mapped[0].duration
-        );
-        if (firstLyrics && firstLyrics.length > 0) {
-          mapped[0] = { ...mapped[0], lyrics: firstLyrics };
-        }
-        // Background prefetch lyrics for next tracks in queue
-        mapped.slice(1, 4).forEach((t) => {
-          fetchLyricsForSpotifyTrack(t.title, t.artist, t.duration).catch(() => {});
-        });
-        return mapped;
-      }
+    const { ok, isJson, data } = await safeJsonFetch<{ tracks?: any[] }>(
+      '/api/spotify/search?q=' + encodeURIComponent(trimmed),
+      { headers }
+    );
+    if (isJson && ok && Array.isArray(data?.tracks)) {
+      return data.tracks
+        .filter((track: any) => track && track.id && track.name)
+        .map((track: any, idx: number) => mapSpotifyTrackToMusicTrack(track, idx));
     }
   } catch {
-    // Fall through
+    // Try the browser token below.
   }
 
-  // 2. Try Spotify Search API if token is available
-  if (cleanToken) {
-    try {
-      const res = await fetch(
-        `https://api.spotify.com/v1/search?q=${encodeURIComponent(trimmed)}&type=track&limit=14`,
-        {
-          headers: { Authorization: `Bearer ${cleanToken}` },
-        }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const items = data?.tracks?.items || [];
-        if (items.length > 0) {
-          return items.map((t: any, idx: number) => mapSpotifyTrackToMusicTrack(t, idx));
-        }
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  // 3. Universal fallback via iTunes Search API
+  if (!cleanToken || cleanToken === 'server_managed_session') return [];
   try {
     const res = await fetch(
-      `https://itunes.apple.com/search?term=${encodeURIComponent(trimmed)}&entity=song&limit=14`
+      'https://api.spotify.com/v1/search?q=' + encodeURIComponent(trimmed) + '&type=track&limit=14',
+      { headers: { Authorization: 'Bearer ' + cleanToken } }
     );
-    if (res.ok) {
-      const data = await res.json();
-      const results = data?.results || [];
-      return results.map((item: any, idx: number) => {
-        const hiResArt = item.artworkUrl100
-          ? String(item.artworkUrl100).replace('100x100bb', '600x600bb')
-          : undefined;
-        return mapSpotifyTrackToMusicTrack(
-          {
-            id: String(item.trackId || `search-${idx}`),
-            name: item.trackName,
-            artists: [{ name: item.artistName }],
-            album: {
-              name: item.collectionName,
-              images: hiResArt ? [{ url: hiResArt }] : [],
-            },
-            duration_ms: item.trackTimeMillis || 180000,
-            preview_url: item.previewUrl,
-          },
-          idx
-        );
-      });
-    }
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items = data?.tracks?.items || [];
+    return items
+      .filter((track: any) => track && track.id && track.name)
+      .map((track: any, idx: number) => mapSpotifyTrackToMusicTrack(track, idx));
   } catch {
-    // Ignore error
+    return [];
   }
-
-  return [];
 }
 
 export async function fetchRealStarterCatalog(): Promise<{
