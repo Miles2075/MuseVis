@@ -152,42 +152,6 @@ export function mapSpotifyTrackToMusicTrack(spTrack: any, index = 0): MusicTrack
   const chordProgression = CHORD_PROGRESSIONS[absHash % CHORD_PROGRESSIONS.length];
   const coverUrl = spTrack?.album?.images?.[0]?.url || getAbstractPlaceholderCover(mood);
 
-  const POETIC_MOOD_VERSES: Record<MusicTrack['mood'], string[]> = {
-    Ethereal: [
-      'Raat ki khamoshi mein kho gaye',
-      'Sitaron ki roshni mein gunguna rahe',
-      'Tere khwabon mein hi hum ji rahe',
-      'Dhundli yaadein, dil mein bas gayi',
-      'Hawaon ke sang udne ka mann hai',
-      'Sukoon ki talaash mein hum gum hain',
-    ],
-    Kinetic: [
-      'Neon lights mein bhaage, jab shehar so gaya',
-      'Dil ki dhadkan tez, sapna mera ho gaya',
-      'Raftaar mein hum, masti mein choor',
-      'Manzil door hai, par hum majboor nahi',
-      'Aag lagi hai seene mein, jeetne ka junoon',
-      'Raste naye hain, aur hum taiyaar hain',
-    ],
-    Melancholic: [
-      'Purani yaadein, jaise baarish ki bundein',
-      'Alfaaz mere, tere bin hain adhoore',
-      'Tanhai ka aalam, dil mein hai chupa',
-      'Waqt ruk gaya, jaise main akela hua',
-      'Khamosh galiyon mein, teri parchayi hai',
-      'Yaadon ka karwaan, har pal yaad aayi hai',
-    ],
-    Euphoric: [
-      'Sunheri roshni, badalon ke paar',
-      'Khushi ka jashn, hai har taraf bahaar',
-      'Sapne sach hue, aaj dil khush hai',
-      'Zindagi ka ye pal, sabse anmol hai',
-      'Umeedon ke pankh, falak tak le jayenge',
-      'Aaj hum milke, naye geet gayenge',
-    ],
-  };
-
-  const step = Math.max(6, Math.floor(duration / 8));
 
   return {
     id,
@@ -217,36 +181,6 @@ export function isShortPreviewUrl(url?: string | null): boolean {
     lower.includes('cdns-preview-')
   );
 }
-
-function extractClientSaavnDownloadUrl(song: any): string | null {
-  const urls = song?.downloadUrl || song?.download_url;
-  if (!Array.isArray(urls) || urls.length === 0) return null;
-  const sorted = [...urls].reverse();
-  for (const item of sorted) {
-    const link = item?.url || item?.link;
-    if (typeof link === 'string' && link.startsWith('http')) {
-      return link.replace(/^http:\/\//i, 'https://');
-    }
-  }
-  return null;
-}
-
-function extractClientSaavnCover(song: any): string | null {
-  const images = song?.image;
-  if (Array.isArray(images) && images.length > 0) {
-    const last = images[images.length - 1];
-    const link = last?.url || last?.link;
-    if (typeof link === 'string' && link.startsWith('http')) {
-      return link.replace(/^http:\/\//i, 'https://');
-    }
-  }
-  return null;
-}
-
-const clientMediaCache = new Map<
-  string,
-  { previewUrl: string | null; coverUrl: string | null; duration?: number; isFullTrack: boolean }
->();
 
 export async function resolveTrackMedia(
   _title: string,
@@ -312,10 +246,6 @@ export function parseLrcLyrics(lrcText: string): LyricLine[] {
   }
 
   const sorted = parsed.sort((a, b) => a.time - b.time);
-  // Anchor the very first lyric line at 0:00 so real lyrics are displayed immediately from the start of the song
-  if (sorted.length > 0 && sorted[0].time > 0) {
-    sorted[0] = { ...sorted[0], time: 0 };
-  }
   return sorted;
 }
 
