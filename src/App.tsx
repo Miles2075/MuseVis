@@ -830,6 +830,7 @@ export default function App() {
     }
 
     if (pl.tracks?.length) {
+      if (spotifyIsPlaying) void controlSpotifyRemotePlayer('pause');
       setSpotifyIsPlaying(false);
       setTracks(pl.tracks);
       setCurrentTrackIndex(0);
