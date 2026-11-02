@@ -1380,11 +1380,14 @@ export default function App() {
     });
     setIsPlaying(false);
     setSpotifyIsPlaying(false);
-    const title = file.name.replace(/\\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Local audio';
+    const fileLabel = file.name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim() || 'Local audio';
+    const nameParts = fileLabel.split(/\s+-\s+/);
+    const artist = nameParts.length > 1 ? nameParts.shift()!.trim() : 'Unknown artist';
+    const title = nameParts.length > 0 ? nameParts.join(' - ').trim() : fileLabel;
     const studioTrack: MusicTrack = {
       id: `studio-${Date.now()}`,
       title,
-      artist: 'Local audio file',
+      artist,
       album: 'MuseVis Studio',
       duration: 180,
       bpm: 100,
