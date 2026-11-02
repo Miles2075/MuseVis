@@ -328,18 +328,18 @@ export async function fetchLyricsForSpotifyTrack(
 ): Promise<LyricLine[] | null> {
   try {
     const cleanTitle = decodeHtmlEntities(title)
-      .replace(/\\s*\\(.*?\\)\\s*/g, '')
-      .replace(/\\s*\\[.*?\\]\\s*/g, '')
+      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*\[.*?\]\s*/g, '')
       .trim();
     const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
     if (!cleanTitle || !primaryArtist) return null;
 
     const targetDuration = Math.max(30, Math.round(durationSec || 200));
-    const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}::${Math.round(targetDuration / 4) * 4}`;
+    const cacheKey = cleanTitle.toLowerCase() + '::' + primaryArtist.toLowerCase() + '::' + (Math.round(targetDuration / 4) * 4);
     if (clientLyricsCache.has(cacheKey)) return clientLyricsCache.get(cacheKey)!;
 
     const params = new URLSearchParams({ track_name: cleanTitle, artist_name: primaryArtist });
-    const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`);
+    const response = await fetch('https://lrclib.net/api/search?' + params.toString());
     if (!response.ok) return null;
     const items: any[] = await response.json();
     if (!Array.isArray(items)) return null;
@@ -443,133 +443,22 @@ export async function searchSpotifyCatalog(
     token && token !== 'server_managed_session'
       ? token
       : localStorage.getItem('musevis_spotify_token') || undefined;
+  if (!cleanToken) return [];
 
-  // 1. Try server-side Full-Track 320kbps Catalog Resolver (/api/audio/search) so every returned track has matched title, artist, 500x500 official cover art, and full 3-5 min audio stream
-  try {
-    const { ok, isJson, data } = await safeJsonFetch<{
-      tracks?: Array<{
-        id: string;
-        title: string;
-        artist: string;
-        album: string;
-        duration: number;
-        coverUrl: string | null;
-        streamUrl: string;
-        isFullTrack: boolean;
-      }>;
-    }>(`/api/audio/search?q=${encodeURIComponent(trimmed)}`);
-
-    if (isJson && ok && Array.isArray(data?.tracks) && data.tracks.length > 0) {
-      const mapped = data.tracks.map((item, idx) => {
-        const artistList = item.artist
-          .split(',')
-          .map((a) => ({ name: a.trim() }))
-          .filter((a) => a.name);
-        const track = mapSpotifyTrackToMusicTrack(
-          {
-            id: item.id || `full-${idx}`,
-            name: item.title,
-            artists: artistList.length > 0 ? artistList : [{ name: item.artist }],
-            album: {
-              name: item.album || item.title,
-              images: item.coverUrl ? [{ url: item.coverUrl }] : [],
-            },
-            duration_ms: item.duration * 1000,
-            preview_url: item.streamUrl,
-          },
-          idx
-        );
-
-        const primaryArtist = track.artist.split(',')[0].trim();
-        const cleanTitle = track.title
-          .replace(/\s*\(.*?\)\s*/g, '')
-          .replace(/\s*\[.*?\]\s*/g, '')
-          .replace(/\s*-.*$/, '')
-          .trim();
-        const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
-        clientMediaCache.set(cacheKey, {
-          previewUrl: item.streamUrl,
-          coverUrl: item.coverUrl,
-          duration: item.duration,
-          isFullTrack: true,
-        });
-
-        return track;
-      });
-      if (mapped.length > 0) {
-        const firstLyrics = await fetchLyricsForSpotifyTrack(
-          mapped[0].title,
-          mapped[0].artist,
-          mapped[0].duration
-        );
-        if (firstLyrics && firstLyrics.length > 0) {
-          mapped[0] = { ...mapped[0], lyrics: firstLyrics };
-        }
-        // Background prefetch lyrics for next tracks in queue
-        mapped.slice(1, 4).forEach((t) => {
-          fetchLyricsForSpotifyTrack(t.title, t.artist, t.duration).catch(() => {});
-        });
-        return mapped;
-      }
-    }
-  } catch {
-    // Fall through
-  }
-
-  // 2. Try Spotify Search API if token is available
-  if (cleanToken) {
-    try {
-      const res = await fetch(
-        `https://api.spotify.com/v1/search?q=${encodeURIComponent(trimmed)}&type=track&limit=14`,
-        {
-          headers: { Authorization: `Bearer ${cleanToken}` },
-        }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const items = data?.tracks?.items || [];
-        if (items.length > 0) {
-          return items.map((t: any, idx: number) => mapSpotifyTrackToMusicTrack(t, idx));
-        }
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  // 3. Universal fallback via iTunes Search API
   try {
     const res = await fetch(
-      `https://itunes.apple.com/search?term=${encodeURIComponent(trimmed)}&entity=song&limit=14`
+      'https://api.spotify.com/v1/search?q=' + encodeURIComponent(trimmed) + '&type=track&limit=14',
+      { headers: { Authorization: 'Bearer ' + cleanToken } }
     );
-    if (res.ok) {
-      const data = await res.json();
-      const results = data?.results || [];
-      return results.map((item: any, idx: number) => {
-        const hiResArt = item.artworkUrl100
-          ? String(item.artworkUrl100).replace('100x100bb', '600x600bb')
-          : undefined;
-        return mapSpotifyTrackToMusicTrack(
-          {
-            id: String(item.trackId || `search-${idx}`),
-            name: item.trackName,
-            artists: [{ name: item.artistName }],
-            album: {
-              name: item.collectionName,
-              images: hiResArt ? [{ url: hiResArt }] : [],
-            },
-            duration_ms: item.trackTimeMillis || 180000,
-            preview_url: item.previewUrl,
-          },
-          idx
-        );
-      });
-    }
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items = data?.tracks?.items || [];
+    return items
+      .filter((track: any) => track && track.id && track.name)
+      .map((track: any, idx: number) => mapSpotifyTrackToMusicTrack(track, idx));
   } catch {
-    // Ignore error
+    return [];
   }
-
-  return [];
 }
 
 export async function fetchRealStarterCatalog(): Promise<{
