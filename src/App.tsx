@@ -227,7 +227,6 @@ export default function App() {
   const [bloomIntensity, setBloomIntensity] = useState<number>(1.0);
   const [bassFlashIntensity, setBassFlashIntensity] = useState<number>(0);
   const [smartShuffleEnabled, setSmartShuffleEnabled] = useState<boolean>(false);
-  const [sdkDeviceId, setSdkDeviceId] = useState<string | null>(null);
   const [spotifyIsPlaying, setSpotifyIsPlaying] = useState<boolean>(false);
   const studioFileInputRef = useRef<HTMLInputElement | null>(null);
   const [spotifyDeviceName, setSpotifyDeviceName] = useState<string | null>(null);
@@ -764,7 +763,6 @@ export default function App() {
 
   // Spotify's Web Playback SDK is intentionally not attached to the visualizer/audio analyser.
   useEffect(() => {
-    setSdkDeviceId(null);
     synthEngine.setExternalStreamMode(false);
   }, [spotifyConnected]);
 
@@ -831,6 +829,7 @@ export default function App() {
     }
 
     if (pl.tracks?.length) {
+      setSpotifyIsPlaying(false);
       setTracks(pl.tracks);
       setCurrentTrackIndex(0);
       setProgress(0);
@@ -1210,7 +1209,7 @@ export default function App() {
       const action = spotifyIsPlaying ? 'pause' : 'play';
       const ok = await controlSpotifyRemotePlayer(action, {
         trackUri: action === 'play' ? currentTrack.spotifyUri : undefined,
-        deviceId: sdkDeviceId || undefined,
+        
       });
       if (ok) setSpotifyIsPlaying(action === 'play');
       else setAuthNotice('Open Spotify on an active device, then try the playback control again.');
@@ -1375,10 +1374,10 @@ export default function App() {
       return;
     }
     const objectUrl = URL.createObjectURL(file);
+    synthEngine.stop();
     tracks.forEach((track) => {
       if (track.platform === 'MuseVis Studio' && track.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(track.previewUrl);
     });
-    synthEngine.stop();
     setIsPlaying(false);
     setSpotifyIsPlaying(false);
     const title = file.name.replace(/\\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Local audio';
@@ -1749,7 +1748,9 @@ export default function App() {
                     />
                   ) : (
                     <div className="text-center py-20 text-slate-400">
-                      No lyrics available for this track.
+                      {currentTrack.platform === 'Spotify'
+                        ? 'Spotify playback is kept separate from synchronized visual media. Import an audio file into MuseVis Studio to use verified timed lyrics with the visualizer.'
+                        : 'No verified synchronized lyrics are available for this local audio file.'}
                     </div>
                   )}
                 </div>
@@ -2406,7 +2407,8 @@ export default function App() {
               <div className="hidden sm:flex items-center gap-1.5 ml-1">
                 <button
                   onClick={toggleMute}
-                  title="Toggle Mute (Shortcut: M)"
+                  disabled={currentTrack.platform === 'Spotify'}
+                  title="Toggle Mute (Shortcut: M) — Studio audio only"
                   aria-label="Toggle Mute"
                   className="p-1.5 text-slate-400 hover:text-white cursor-pointer flex items-center gap-1"
                 >
@@ -2419,6 +2421,7 @@ export default function App() {
                 </button>
                 <input
                   type="range"
+                  disabled={currentTrack.platform === 'Spotify'}
                   min={0}
                   max={1}
                   step={0.05}
