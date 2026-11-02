@@ -45,15 +45,11 @@ import {
   mapSpotifyTrackToMusicTrack,
   fetchSpotifyPlaylistTracks,
   fetchLyricsForSpotifyTrack,
-  resolveTrackStreamUrl,
-  resolveTrackMedia,
-  isShortPreviewUrl,
   searchSpotifyCatalog,
   fetchRealStarterCatalog,
   controlSpotifyRemotePlayer,
   resolveSpotifyTrackUri,
   fetchSpotifyLivePlayerState,
-  initSpotifyWebPlaybackSdk,
   searchSpotifyPlaylists,
 } from './utils/spotifyClient';
 
@@ -232,6 +228,8 @@ export default function App() {
   const [bassFlashIntensity, setBassFlashIntensity] = useState<number>(0);
   const [smartShuffleEnabled, setSmartShuffleEnabled] = useState<boolean>(false);
   const [sdkDeviceId, setSdkDeviceId] = useState<string | null>(null);
+  const [spotifyIsPlaying, setSpotifyIsPlaying] = useState<boolean>(false);
+  const studioFileInputRef = useRef<HTMLInputElement | null>(null);
   const [spotifyDeviceName, setSpotifyDeviceName] = useState<string | null>(null);
   const shortcutTimerRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -736,373 +734,108 @@ export default function App() {
     };
   }, [isPlaying, currentTrack.id, currentTrack.duration, currentTrackIndex]);
 
-  // Fetch real synchronized LRC lyrics, full-length audio stream URL, & real Spotify Track URI whenever a track becomes active
+  // Spotify catalog tracks are metadata only. Never resolve their audio from third-party stream providers.
   useEffect(() => {
     let cancelled = false;
-    if (!currentTrack || currentTrack.id === DEFAULT_IDLE_TRACK.id) return;
+    if (!currentTrack || currentTrack.id === DEFAULT_IDLE_TRACK.id || currentTrack.platform !== 'Spotify') return;
     const targetTrackId = currentTrack.id;
-
-    // 1. Resolve full-length 320kbps song stream URL & high-res album artwork
-    const hasRealCover =
-      Boolean(currentTrack.coverUrl) &&
-      !String(currentTrack.coverUrl).startsWith('/assets/albums/');
-    const needsFullStream =
-      !currentTrack.previewUrl || isShortPreviewUrl(currentTrack.previewUrl);
-
-    if (needsFullStream || !hasRealCover) {
-      resolveTrackMedia(
-        currentTrack.title,
-        currentTrack.artist,
-        currentTrack.previewUrl,
-        currentTrack.coverUrl
-      ).then(({ previewUrl, coverUrl, duration }) => {
-        if (cancelled || (!previewUrl && !coverUrl)) return;
-
-        const nextDuration =
-          typeof duration === 'number' && duration >= 45 ? duration : currentTrack.duration;
-        const upgradedTrack: MusicTrack = {
-          ...currentTrack,
-          previewUrl: previewUrl || currentTrack.previewUrl,
-          coverUrl: coverUrl || currentTrack.coverUrl,
-          duration: nextDuration,
-        };
-
-        setTracks((prev) =>
-          prev.map((t) => (t.id === targetTrackId ? { ...t, ...upgradedTrack } : t))
-        );
-
-        // Only start stream from background effect if playback is active and no stream is currently playing or loading
-        if (
-          isPlaying &&
-          previewUrl &&
-          !isShortPreviewUrl(previewUrl) &&
-          !synthEngine.isStreamingRealAudio() &&
-          Date.now() - lastLocalControlTimeRef.current > 2500
-        ) {
-          synthEngine.start(upgradedTrack);
-          const currentPos = synthEngine.getCurrentTime() || 0;
-          if (currentPos > 1 && currentPos < nextDuration - 4) {
-            synthEngine.seek(currentPos);
-          }
-          synthEngine.setVolume(isMuted ? 0 : volume);
-        }
-      });
-    }
-
-    // 2. Resolve canonical 22-character Spotify Track URI so Spotify Connect & Mini Player stay synced to the active song
     if (!currentTrack.spotifyUri || !/^spotify:track:[a-zA-Z0-9]{22}$/.test(currentTrack.spotifyUri)) {
-      resolveSpotifyTrackUri(
-        currentTrack.title,
-        currentTrack.artist,
-        currentTrack.spotifyUri
-      ).then((resolvedUri) => {
+      resolveSpotifyTrackUri(currentTrack.title, currentTrack.artist, currentTrack.spotifyUri).then((resolvedUri) => {
         if (!cancelled && resolvedUri) {
-          setTracks((prev) =>
-            prev.map((t) => (t.id === targetTrackId ? { ...t, spotifyUri: resolvedUri } : t))
-          );
+          setTracks((prev) => prev.map((t) => t.id === targetTrackId ? { ...t, spotifyUri: resolvedUri } : t));
         }
       });
     }
+    return () => { cancelled = true; };
+  }, [currentTrack?.id, currentTrack?.title, currentTrack?.artist, currentTrack?.platform]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [currentTrack?.id, currentTrack?.title, currentTrack?.artist]);
-
-  // 3. Fetch duration-matched synchronized LRC lyrics whenever the active track or its verified stream duration updates
+  // Lyrics are only loaded for independent MuseVis Studio audio, never for Spotify playback.
   useEffect(() => {
     let cancelled = false;
-    if (!currentTrack || currentTrack.id === DEFAULT_IDLE_TRACK.id) return;
+    if (!currentTrack || currentTrack.id === DEFAULT_IDLE_TRACK.id || currentTrack.platform !== 'MuseVis Studio') return;
     const targetTrackId = currentTrack.id;
-
-    fetchLyricsForSpotifyTrack(
-      currentTrack.title,
-      currentTrack.artist,
-      currentTrack.duration
-    ).then((lyrics) => {
+    fetchLyricsForSpotifyTrack(currentTrack.title, currentTrack.artist, currentTrack.duration).then((lyrics) => {
       if (!cancelled && lyrics && lyrics.length > 0) {
-        setTracks((prev) =>
-          prev.map((t) => (t.id === targetTrackId ? { ...t, lyrics } : t))
-        );
+        setTracks((prev) => prev.map((t) => t.id === targetTrackId ? { ...t, lyrics } : t));
       }
     });
+    return () => { cancelled = true; };
+  }, [currentTrack?.id, currentTrack?.title, currentTrack?.artist, currentTrack?.platform, Math.round((currentTrack?.duration || 200) / 4)]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    currentTrack?.id,
-    currentTrack?.title,
-    currentTrack?.artist,
-    Math.round((currentTrack?.duration || 200) / 4),
-  ]);
-
-  // Initialize in-browser Spotify Web Playback SDK when connected for full-length song streaming
+  // Spotify's Web Playback SDK is intentionally not attached to the visualizer/audio analyser.
   useEffect(() => {
-    if (!spotifyConnected) {
-      setSdkDeviceId(null);
-      synthEngine.setExternalStreamMode(false);
-      return;
-    }
-
-    let mounted = true;
-    const disposeSdk = initSpotifyWebPlaybackSdk(
-      () => localStorage.getItem('musevis_spotify_token'),
-      {
-        onReady: (deviceId) => {
-          if (!mounted) return;
-          setSdkDeviceId(deviceId);
-          setAuthNotice('Full-Track Spotify Web Player active — songs now stream in full.');
-          setTimeout(() => setAuthNotice(null), 4000);
-        },
-        onStateChange: (state) => {
-          if (!mounted || !state) return;
-          // Do not let SDK events overwrite local audio streams or active user scrubbing
-          if (synthEngine.isStreamingRealAudio() || isScrubbingRef.current) {
-            return;
-          }
-          if (typeof state.positionSec === 'number') {
-            setProgress(state.positionSec);
-          }
-          if (isPlaying !== !state.paused) {
-            setIsPlaying(!state.paused);
-          }
-        },
-        onError: () => {
-          if (!mounted) return;
-          setSdkDeviceId(null);
-          synthEngine.setExternalStreamMode(false);
-        },
-      }
-    );
-
-    return () => {
-      mounted = false;
-      disposeSdk();
-    };
+    setSdkDeviceId(null);
+    synthEngine.setExternalStreamMode(false);
   }, [spotifyConnected]);
 
-  // Sync live track & playback position with Spotify (bi-directional)
+  // Read Spotify's now-playing metadata without mirroring its audio, timeline, or lyrics into MuseVis.
   const syncTrackWithSpotify = async (manualTrigger = false) => {
-    // Respect recent local user actions so background polling never hijacks or restarts a song the user just started
-    if (!manualTrigger && Date.now() - lastLocalControlTimeRef.current < 12000) {
-      return;
-    }
-    // If MuseVis is actively streaming a full local song and not using the Spotify Web Playback SDK, do not let background polling interrupt it
-    if (!manualTrigger && synthEngine.isStreamingRealAudio() && !sdkDeviceId) {
-      return;
-    }
-
     const liveState = await fetchSpotifyLivePlayerState();
     if (liveState?.track) {
-      if (liveState.deviceName) {
-        setSpotifyDeviceName(liveState.deviceName);
-      }
-      // In automatic background mode, if remote Spotify is paused, pause MuseVis too.
-      if (!manualTrigger && !liveState.isPlaying) {
-        if (isPlaying) {
-            synthEngine.stop();
-            setIsPlaying(false);
-        }
-        return;
-      }
-
+      setSpotifyDeviceName(liveState.deviceName || null);
+      setSpotifyIsPlaying(liveState.isPlaying);
       const spTrack = liveState.track;
-      const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const isSameAsCurrent =
-        currentTrack.id === spTrack.id ||
-        (currentTrack.spotifyUri && currentTrack.spotifyUri === spTrack.spotifyUri) ||
-        (normTitle(currentTrack.title) === normTitle(spTrack.title) &&
-          normTitle(currentTrack.artist) === normTitle(spTrack.artist));
-
-      if (!isSameAsCurrent) {
-        // Switch active track in MuseVis to match the song currently playing on Spotify
-        const media = await resolveTrackMedia(
-          spTrack.title,
-          spTrack.artist,
-          spTrack.previewUrl,
-          spTrack.coverUrl
-        );
-        const enrichedSpTrack: MusicTrack = {
-          ...spTrack,
-          previewUrl: media.previewUrl || spTrack.previewUrl,
-          coverUrl: media.coverUrl || spTrack.coverUrl,
-        };
-
-        setTracks((prev) => {
-          const existingIdx = prev.findIndex(
-            (t) =>
-              t.id === enrichedSpTrack.id ||
-              (t.spotifyUri && t.spotifyUri === enrichedSpTrack.spotifyUri) ||
-              (normTitle(t.title) === normTitle(enrichedSpTrack.title) &&
-                normTitle(t.artist) === normTitle(enrichedSpTrack.artist))
-          );
-          if (existingIdx !== -1) {
-            setCurrentTrackIndex(existingIdx);
-            return prev.map((t, i) => (i === existingIdx ? { ...t, ...enrichedSpTrack } : t));
-          }
-          setCurrentTrackIndex(0);
-          return [enrichedSpTrack, ...prev];
-        });
-
-        setProgress(liveState.progressSec);
-        if (liveState.isPlaying) {
-          synthEngine.unlock();
-          synthEngine.start(enrichedSpTrack);
-          synthEngine.seek(liveState.progressSec);
-          synthEngine.setVolume(isMuted ? 0 : volume);
-          setIsPlaying(true);
-        } else if (manualTrigger) {
-          synthEngine.stop();
-          setIsPlaying(false);
+      setTracks((prev) => {
+        const existingIdx = prev.findIndex((t) => t.id === spTrack.id || t.spotifyUri === spTrack.spotifyUri);
+        if (existingIdx >= 0) {
+          setCurrentTrackIndex(existingIdx);
+          return prev.map((t, i) => i === existingIdx ? { ...t, ...spTrack } : t);
         }
-        if (manualTrigger) {
-          setAuthNotice(
-            `Synced from Spotify: "${spTrack.title}" by ${spTrack.artist}${
-              liveState.deviceName ? ` (${liveState.deviceName})` : ''
-            }`
-          );
-          setTimeout(() => setAuthNotice(null), 3500);
-        }
-      } else {
-        // Same song — only seek or change state when manually requested or when using Spotify SDK
-        if (manualTrigger) {
-          setProgress(liveState.progressSec);
-          synthEngine.seek(liveState.progressSec);
-          setAuthNotice(
-            `Locked in sync with Spotify: "${spTrack.title}" at ${formatTime(liveState.progressSec)}`
-          );
-          setTimeout(() => setAuthNotice(null), 3500);
-        } else if (sdkDeviceId) {
-          setProgress((prev) =>
-            Math.abs(prev - liveState.progressSec) > 2 ? liveState.progressSec : prev
-          );
-        }
+        setCurrentTrackIndex(0);
+        return [spTrack, ...prev.filter((t) => t.platform !== 'Spotify')];
+      });
+      setProgress(0);
+      if (manualTrigger) {
+        setAuthNotice(`Spotify connected: "${spTrack.title}" by ${spTrack.artist}. Audio visualization is available in MuseVis Studio mode.`);
+        setTimeout(() => setAuthNotice(null), 4500);
       }
       return;
     }
-
-    // If no active Spotify session was returned or user clicked Sync manually to push current MuseVis track TO Spotify:
     if (manualTrigger) {
-      const resolvedUri = await resolveSpotifyTrackUri(
-        currentTrack.title,
-        currentTrack.artist,
-        currentTrack.spotifyUri
-      );
-      if (resolvedUri && spotifyConnected) {
-        const pushed = await controlSpotifyRemotePlayer('play', {
-          trackUri: resolvedUri,
-          positionMs: Math.round(progress * 1000),
-          deviceId: sdkDeviceId,
-        });
-        if (pushed) {
-          setAuthNotice(
-            `Sent "${currentTrack.title}" (${formatTime(progress)}) to your active Spotify player.`
-          );
-          setTimeout(() => setAuthNotice(null), 3500);
-          return;
-        }
-      }
-      // Also open & lock the Spotify Mini Player widget to the exact active track
       setShowSpotifyEmbed(true);
-      setAuthNotice(
-        `Synced "${currentTrack.title}" by ${currentTrack.artist} to the Spotify Player.`
-      );
-      setTimeout(() => setAuthNotice(null), 3500);
+      setAuthNotice('No active Spotify playback session. Start a track in Spotify, then sync metadata again.');
+      setTimeout(() => setAuthNotice(null), 4000);
     }
   };
 
   const handleSelectPlaylist = async (pl: PlaylistItem, autoPlay = false) => {
-    if (autoPlay || isPlaying) {
-      synthEngine.unlock();
-    }
     lastLocalControlTimeRef.current = Date.now();
     const reqId = ++trackRequestIdRef.current;
     setSelectedPlaylistId(pl.id);
-    if (pl.tracks && pl.tracks.length > 0 && pl.id.startsWith('live-')) {
-      setTracks(pl.tracks);
-      setCurrentTrackIndex(0);
-      setProgress(0);
-      if (autoPlay || isPlaying) {
-        let playableTrack = pl.tracks[0];
-        if (!playableTrack.previewUrl || isShortPreviewUrl(playableTrack.previewUrl)) {
-          const media = await resolveTrackMedia(
-            playableTrack.title,
-            playableTrack.artist,
-            playableTrack.previewUrl,
-            playableTrack.coverUrl
-          );
-          if (reqId !== trackRequestIdRef.current) return;
-          playableTrack = {
-            ...playableTrack,
-            previewUrl: media.previewUrl || playableTrack.previewUrl,
-            coverUrl: media.coverUrl || playableTrack.coverUrl,
-            duration:
-              typeof media.duration === 'number' && media.duration >= 45
-                ? media.duration
-                : playableTrack.duration,
-          };
-        }
-        synthEngine.start(playableTrack);
-        synthEngine.setVolume(isMuted ? 0 : volume);
-        setIsPlaying(true);
-      }
-      return;
-    }
 
-    if (pl.source === 'Spotify') {
+    if (pl.source === 'Spotify' && !pl.id.startsWith('live-')) {
       setIsSyncing(true);
       const realTracks = await fetchSpotifyPlaylistTracks(pl.id, undefined, pl.name);
       setIsSyncing(false);
       if (reqId !== trackRequestIdRef.current) return;
       if (realTracks.length > 0) {
-        setPlaylists((prev) =>
-          prev.map((item) =>
-            item.id === pl.id
-              ? { ...item, tracks: realTracks, trackCount: item.trackCount || realTracks.length }
-              : item
-          )
-        );
+        setPlaylists((prev) => prev.map((item) => item.id === pl.id
+          ? { ...item, tracks: realTracks, trackCount: item.trackCount || realTracks.length }
+          : item));
         setTracks(realTracks);
         setCurrentTrackIndex(0);
         setProgress(0);
-
-        const firstTrack = realTracks[0];
-        if (autoPlay || isPlaying) {
-          let playableTrack = firstTrack;
-          if (!playableTrack.previewUrl || isShortPreviewUrl(playableTrack.previewUrl)) {
-            const media = await resolveTrackMedia(
-              firstTrack.title,
-              firstTrack.artist,
-              firstTrack.previewUrl,
-              firstTrack.coverUrl
-            );
-            if (reqId !== trackRequestIdRef.current) return;
-            playableTrack = {
-              ...firstTrack,
-              previewUrl: media.previewUrl || firstTrack.previewUrl,
-              coverUrl: media.coverUrl || firstTrack.coverUrl,
-              duration:
-                typeof media.duration === 'number' && media.duration >= 45
-                  ? media.duration
-                  : firstTrack.duration,
-            };
-          }
-          synthEngine.start(playableTrack);
-          synthEngine.setVolume(isMuted ? 0 : volume);
-          setIsPlaying(true);
+        synthEngine.stop();
+        setIsPlaying(false);
+        if (autoPlay) {
+          await controlSpotifyRemotePlayer('play', { contextUri: pl.spotifyUri || `spotify:playlist:${pl.id}` });
+          setSpotifyIsPlaying(true);
         }
-        return;
       }
+      return;
     }
-    if (pl.tracks && pl.tracks.length > 0) {
+
+    if (pl.tracks?.length) {
       setTracks(pl.tracks);
       setCurrentTrackIndex(0);
       setProgress(0);
-      if (autoPlay || isPlaying) {
+      if (pl.tracks[0].platform === 'MuseVis Studio' && autoPlay) {
         synthEngine.start(pl.tracks[0]);
         synthEngine.setVolume(isMuted ? 0 : volume);
         setIsPlaying(true);
+      } else {
+        synthEngine.stop();
+        setIsPlaying(false);
       }
     }
   };
@@ -1114,21 +847,19 @@ export default function App() {
     setSearchResults([]);
     try {
       if (searchType === 'track') {
-          synthEngine.unlock();
-          lastLocalControlTimeRef.current = Date.now();
-          const results = await searchSpotifyCatalog(searchQuery);
-          if (results.length > 0) {
-            setTracks(results);
-            setCurrentTrackIndex(0);
-            setProgress(0);
-            synthEngine.start(results[0]);
-            synthEngine.setVolume(isMuted ? 0 : volume);
-            setIsPlaying(true);
-            setActiveModal('none');
-          }
+        const results = await searchSpotifyCatalog(searchQuery);
+        if (results.length > 0) {
+          synthEngine.stop();
+          setIsPlaying(false);
+          setSpotifyIsPlaying(false);
+          setTracks(results);
+          setCurrentTrackIndex(0);
+          setProgress(0);
+          setActiveModal('none');
+        }
       } else {
-          const results = await searchSpotifyPlaylists(searchQuery);
-          setSearchResults(results);
+        const results = await searchSpotifyPlaylists(searchQuery);
+        setSearchResults(results);
       }
     } catch (err) {
       console.error('Search failed', err);
@@ -1470,51 +1201,29 @@ export default function App() {
   };
 
   const togglePlay = async () => {
-    synthEngine.unlock();
     lastLocalControlTimeRef.current = Date.now();
+    if (currentTrack.platform === 'Spotify') {
+      const action = spotifyIsPlaying ? 'pause' : 'play';
+      const ok = await controlSpotifyRemotePlayer(action, {
+        trackUri: action === 'play' ? currentTrack.spotifyUri : undefined,
+        deviceId: sdkDeviceId || undefined,
+      });
+      if (ok) setSpotifyIsPlaying(action === 'play');
+      else setAuthNotice('Open Spotify on an active device, then try the playback control again.');
+      return;
+    }
+
+    synthEngine.unlock();
     if (isPlaying) {
       synthEngine.stop();
       setIsPlaying(false);
-      if (spotifyConnected) {
-        controlSpotifyRemotePlayer('pause', { deviceId: sdkDeviceId });
-      }
     } else {
-      let playable = currentTrack;
-      if (playable.id === DEFAULT_IDLE_TRACK.id) {
+      if (currentTrack.id === DEFAULT_IDLE_TRACK.id) {
         setActiveModal('sync');
         return;
       }
-      const reqId = ++trackRequestIdRef.current;
-      const hasFullStream = Boolean(playable.previewUrl) && !isShortPreviewUrl(playable.previewUrl);
-
-      if (!hasFullStream) {
-        const media = await resolveTrackMedia(
-          playable.title,
-          playable.artist,
-          playable.previewUrl,
-          playable.coverUrl
-        );
-        if (reqId !== trackRequestIdRef.current) return;
-        if (media.previewUrl || media.coverUrl) {
-          playable = {
-            ...playable,
-            previewUrl: media.previewUrl || playable.previewUrl,
-            coverUrl: media.coverUrl || playable.coverUrl,
-            duration:
-              typeof media.duration === 'number' && media.duration >= 45
-                ? media.duration
-                : playable.duration,
-          };
-          setTracks((prev) =>
-            prev.map((t) => (t.id === playable.id ? playable : t))
-          );
-        }
-      }
-
-      synthEngine.start(playable);
-      if (progress > 1 && progress < playable.duration - 2) {
-        synthEngine.seek(progress);
-      }
+      synthEngine.start(currentTrack);
+      if (progress > 1 && progress < currentTrack.duration - 2) synthEngine.seek(progress);
       synthEngine.setVolume(isMuted ? 0 : volume);
       setIsPlaying(true);
     }
@@ -1523,70 +1232,39 @@ export default function App() {
   const selectTrack = async (index: number, forcePlay = true) => {
     const target = tracks[index];
     if (!target) return;
-    synthEngine.unlock();
     lastLocalControlTimeRef.current = Date.now();
-    const reqId = ++trackRequestIdRef.current;
-
+    ++trackRequestIdRef.current;
     setCurrentTrackIndex(index);
     setProgress(0);
     setCustomPalette(null);
 
-    if (forcePlay || isPlaying) {
-      let playable = target;
-      const hasFullStream = Boolean(playable.previewUrl) && !isShortPreviewUrl(playable.previewUrl);
-
-      if (!hasFullStream) {
-        // Resolve media FIRST to start playback as soon as possible
-        resolveTrackMedia(
-          playable.title,
-          playable.artist,
-          playable.previewUrl,
-          playable.coverUrl
-        ).then((media) => {
-          if (reqId !== trackRequestIdRef.current) return;
-          const upgraded = {
-            ...playable,
-            previewUrl: media.previewUrl || playable.previewUrl,
-            coverUrl: media.coverUrl || playable.coverUrl,
-            duration:
-              typeof media.duration === 'number' && media.duration >= 45
-                ? media.duration
-                : playable.duration,
-          };
-          setTracks((prev) => prev.map((t) => (t.id === upgraded.id ? upgraded : t)));
-          synthEngine.start(upgraded);
-          synthEngine.setVolume(isMuted ? 0 : volume);
-          setIsPlaying(true);
-
-          // Resolve lyrics in the background
-          fetchLyricsForSpotifyTrack(upgraded.title, upgraded.artist, upgraded.duration).then(
-            (resolvedLyrics) => {
-              if (reqId === trackRequestIdRef.current && resolvedLyrics && resolvedLyrics.length > 0) {
-                setTracks((prev) =>
-                  prev.map((t) => (t.id === upgraded.id ? { ...t, lyrics: resolvedLyrics } : t))
-                );
-              }
-            }
-          );
-        });
-      } else {
-        // Already have stream, start immediately and fetch lyrics in parallel
-        synthEngine.start(playable);
-        synthEngine.setVolume(isMuted ? 0 : volume);
-        setIsPlaying(true);
-
-        fetchLyricsForSpotifyTrack(playable.title, playable.artist, playable.duration).then(
-          (resolvedLyrics) => {
-            if (reqId === trackRequestIdRef.current && resolvedLyrics && resolvedLyrics.length > 0) {
-              setTracks((prev) =>
-                prev.map((t) =>
-                  t.id === playable.id ? { ...t, lyrics: resolvedLyrics } : t
-                )
-              );
-            }
-          }
-        );
+    if (target.platform === 'Spotify') {
+      synthEngine.stop();
+      setIsPlaying(false);
+      if (forcePlay) {
+        let uri = target.spotifyUri;
+        if (!uri) uri = (await resolveSpotifyTrackUri(target.title, target.artist, target.spotifyUri)) || undefined;
+        if (uri) {
+          const ok = await controlSpotifyRemotePlayer('play', { trackUri: uri, deviceId: sdkDeviceId || undefined });
+          setSpotifyIsPlaying(Boolean(ok));
+          if (!ok) setAuthNotice('Spotify track selected. Start playback on an active Spotify device.');
+        } else {
+          setSpotifyIsPlaying(false);
+          setAuthNotice('Could not resolve this Spotify track URI. Try refreshing your Spotify library.');
+        }
       }
+      return;
+    }
+
+    setSpotifyIsPlaying(false);
+    if (forcePlay || isPlaying) {
+      synthEngine.unlock();
+      synthEngine.start(target);
+      synthEngine.setVolume(isMuted ? 0 : volume);
+      setIsPlaying(true);
+    } else {
+      synthEngine.stop();
+      setIsPlaying(false);
     }
   };
 
@@ -1633,14 +1311,9 @@ export default function App() {
       seekCommitTimerRef.current = null;
     }
 
+    if (currentTrack.platform === 'Spotify') return;
     const commitAudioSeek = () => {
       synthEngine.seek(clamped);
-      if (spotifyConnected) {
-        controlSpotifyRemotePlayer('seek', {
-          positionMs: Math.round(clamped * 1000),
-          deviceId: sdkDeviceId,
-        });
-      }
       window.setTimeout(() => {
         isScrubbingRef.current = false;
       }, 150);
@@ -1686,6 +1359,47 @@ export default function App() {
     setTimeout(() => setCopiedUri(false), 2000);
   };
 
+
+  const handleStudioFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('audio/')) {
+      setAuthNotice('Choose an audio file (MP3, WAV, M4A, OGG, or another browser-supported format).');
+      event.target.value = '';
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    tracks.forEach((track) => {
+      if (track.platform === 'MuseVis Studio' && track.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(track.previewUrl);
+    });
+    synthEngine.stop();
+    setIsPlaying(false);
+    setSpotifyIsPlaying(false);
+    const title = file.name.replace(/\\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Local audio';
+    const studioTrack: MusicTrack = {
+      id: `studio-${Date.now()}`,
+      title,
+      artist: 'Local audio file',
+      album: 'MuseVis Studio',
+      duration: 180,
+      bpm: 100,
+      mood: 'Ethereal',
+      platform: 'MuseVis Studio',
+      palette: PALETTE_PRESETS[0],
+      chordProgression: currentTrack.chordProgression,
+      lyrics: undefined,
+      previewUrl: objectUrl,
+      coverUrl: getAbstractPlaceholderCover('Ethereal'),
+    };
+    setTracks([studioTrack]);
+    setCurrentTrackIndex(0);
+    setSelectedPlaylistId('');
+    setProgress(0);
+    setActiveModal('none');
+    setAuthNotice('Local audio loaded in MuseVis Studio. Visualizer and verified synced lyrics are available for this source.');
+    setTimeout(() => setAuthNotice(null), 5000);
+    event.target.value = '';
+  };
 
   const formatTime = (sec: number) => {
     const s = Math.max(0, Math.floor(sec));
@@ -1749,13 +1463,28 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: Spotify Connection */}
-        <button
-          onClick={handleConnectSpotify}
-          className="px-4 py-2 text-xs font-semibold rounded-lg transition-colors bg-white/5 hover:bg-white/10 text-slate-300"
-        >
-          {spotifyConnected ? 'Connected' : 'Connect Spotify'}
-        </button>
+        {/* Zone 3: Independent Studio audio + Spotify library connection */}
+        <div className="flex items-center gap-2">
+          <input
+            ref={studioFileInputRef}
+            type="file"
+            accept="audio/*"
+            className="hidden"
+            onChange={handleStudioFileChange}
+          />
+          <button
+            onClick={() => studioFileInputRef.current?.click()}
+            className="px-4 py-2 text-xs font-semibold rounded-lg transition-colors bg-white text-black hover:bg-slate-200"
+          >
+            Import Audio
+          </button>
+          <button
+            onClick={handleConnectSpotify}
+            className="px-4 py-2 text-xs font-semibold rounded-lg transition-colors bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            {spotifyConnected ? 'Spotify Connected' : 'Connect Spotify'}
+          </button>
+        </div>
       </header>
 
       {/* Global Spectral Frequency Visualizer Overlay */}
@@ -2567,10 +2296,11 @@ export default function App() {
               </span>
               <input
                 type="range"
+                disabled={currentTrack.platform === 'Spotify'}
                 min={0}
                 max={Math.max(1, currentTrack.duration)}
                 step={0.25}
-                value={Math.min(currentTrack.duration, progress)}
+                value={currentTrack.platform === 'Spotify' ? 0 : Math.min(currentTrack.duration, progress)}
                 onPointerDown={() => {
                   isScrubbingRef.current = true;
                 }}
@@ -2601,7 +2331,7 @@ export default function App() {
                 style={{ accentColor: activePalette.primary }}
               />
               <span className="text-xs font-mono tabular-nums text-slate-400 w-9">
-                {formatTime(currentTrack.duration)}
+                {currentTrack.platform === 'Spotify' ? 'Spotify' : formatTime(currentTrack.duration)}
               </span>
             </div>
           </div>
@@ -2621,7 +2351,7 @@ export default function App() {
               <button
                 onClick={togglePlay}
                 title="Play / Pause Audio (Shortcut: Space)"
-                aria-label={isPlaying ? 'Pause' : 'Play'}
+                aria-label={(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : 'Play'}
                 className="px-3.5 py-2 rounded-lg font-semibold text-xs text-black flex items-center gap-1.5 transition-transform active:scale-95 cursor-pointer whitespace-nowrap shrink-0"
                 style={{
                   backgroundColor: activePalette.primary,
@@ -2633,7 +2363,7 @@ export default function App() {
                 ) : (
                   <Play className="w-3.5 h-3.5 fill-current" />
                 )}
-                <span>{isPlaying ? 'Pause' : 'Play Audio'}</span>
+                <span>{(currentTrack.platform === 'Spotify' ? spotifyIsPlaying : isPlaying) ? 'Pause' : currentTrack.platform === 'Spotify' ? 'Play on Spotify' : 'Play Audio'}</span>
               </button>
               <button
                 onClick={handleNextTrack}
