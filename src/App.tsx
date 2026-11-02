@@ -1249,7 +1249,7 @@ export default function App() {
         if (!uri) uri = (await resolveSpotifyTrackUri(target.title, target.artist, target.spotifyUri)) || undefined;
         if (uri) {
           if (reqId !== trackRequestIdRef.current) return;
-          const ok = await controlSpotifyRemotePlayer('play', { trackUri: uri, deviceId: sdkDeviceId || undefined });
+          const ok = await controlSpotifyRemotePlayer('play', { trackUri: uri });
           if (reqId !== trackRequestIdRef.current) return;
           setSpotifyIsPlaying(Boolean(ok));
           if (!ok) setAuthNotice('Spotify track selected. Start playback on an active Spotify device.');
