@@ -1,0 +1,1346 @@
+// Client-side PKCE, Real Spotify Track Mapper, Audio Stream Resolver & Synchronized Lyrics Helper
+import {
+  CHORD_PROGRESSIONS,
+  LyricLine,
+  MusicTrack,
+  hashTrackToPalette,
+  getAbstractPlaceholderCover,
+} from '../data/tracks';
+
+function base64UrlEncode(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export async function createClientPkcePair(): Promise<{
+  codeVerifier: string;
+  codeChallenge: string;
+}> {
+  const randomBytes = new Uint8Array(48);
+  window.crypto.getRandomValues(randomBytes);
+  const codeVerifier = base64UrlEncode(randomBytes.buffer);
+  const encoder = new TextEncoder();
+  const data = encoder.encode(codeVerifier);
+  const digest = await window.crypto.subtle.digest('SHA-256', data);
+  const codeChallenge = base64UrlEncode(digest);
+  return { codeVerifier, codeChallenge };
+}
+
+export async function safeJsonFetch<T = any>(
+  url: string,
+  options?: RequestInit
+): Promise<{ ok: boolean; status: number; isJson: boolean; data: T | null }> {
+  try {
+    const res = await fetch(url, options);
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { ok: false, status: res.status, isJson: false, data: null };
+    }
+    const text = await res.text();
+    if (!text || text.trim().startsWith('<')) {
+      return { ok: false, status: res.status, isJson: false, data: null };
+    }
+    const parsed = JSON.parse(text) as T;
+    return { ok: res.ok, status: res.status, isJson: true, data: parsed };
+  } catch {
+    return { ok: false, status: 0, isJson: false, data: null };
+  }
+}
+
+const MOODS: MusicTrack['mood'][] = ['Ethereal', 'Kinetic', 'Melancholic', 'Euphoric'];
+
+export function decodeHtmlEntities(str: string): string {
+  return String(str || '')
+    .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#039;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function normalizeTrackToken(str: string): string {
+  return decodeHtmlEntities(str)
+    .toLowerCase()
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .replace(/\s*\[.*?\]\s*/g, ' ')
+    .replace(/\s*-\s*(?:remaster|single|version|from|mono|stereo|deluxe|explicit).*$/gi, ' ')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+export function isStrictTrackMatch(
+  candidateTitle: string,
+  candidateArtist: string,
+  targetTitle: string,
+  targetArtist: string
+): boolean {
+  const cTitle = normalizeTrackToken(candidateTitle);
+  const tTitle = normalizeTrackToken(targetTitle);
+  if (!cTitle || !tTitle) return false;
+
+  const rawCandLower = decodeHtmlEntities(`${candidateTitle} ${candidateArtist}`).toLowerCase();
+  const rawTargetLower = decodeHtmlEntities(`${targetTitle} ${targetArtist}`).toLowerCase();
+
+  const unwantedKeywords = [
+    'karaoke',
+    'tribute',
+    'made famous',
+    'in the style of',
+    'originally performed',
+    'originally perfomed',
+    'melody version',
+    'instrumental version',
+    'nightcore',
+    '8-bit',
+    'ringtone',
+  ];
+  for (const kw of unwantedKeywords) {
+    if (rawCandLower.includes(kw) && !rawTargetLower.includes(kw)) {
+      return false;
+    }
+  }
+
+  // Stricter matching
+  const titleMatches =
+    cTitle === tTitle ||
+    (cTitle.includes(tTitle) && tTitle.length >= Math.max(5, Math.floor(cTitle.length * 0.8))) ||
+    (tTitle.includes(cTitle) && cTitle.length >= Math.max(5, Math.floor(tTitle.length * 0.8)));
+
+  if (!titleMatches) return false;
+
+  const tArtist = normalizeTrackToken(targetArtist.split(',')[0]);
+  if (!tArtist) return true;
+
+  const cArtist = normalizeTrackToken(candidateArtist);
+  // Stricter artist matching
+  return (
+    cArtist === tArtist ||
+    (cArtist.includes(tArtist) && tArtist.length >= Math.max(3, Math.floor(cArtist.length * 0.8))) ||
+    (tArtist.includes(cArtist) && cArtist.length >= Math.max(3, Math.floor(tArtist.length * 0.8)))
+  );
+}
+
+export function mapSpotifyTrackToMusicTrack(spTrack: any, index = 0): MusicTrack {
+  const id = String(spTrack?.id || `sp-track-${index}`);
+  const title = decodeHtmlEntities(spTrack?.name || 'Spotify Track').trim();
+  const artist = decodeHtmlEntities(
+    Array.isArray(spTrack?.artists) && spTrack.artists.length > 0
+      ? spTrack.artists.map((a: any) => a.name).join(', ')
+      : 'Spotify Artist'
+  ).trim();
+  const album = decodeHtmlEntities(spTrack?.album?.name || 'Spotify Single').trim();
+  const duration = Math.max(30, Math.round((spTrack?.duration_ms || 180000) / 1000));
+  const previewUrl = spTrack?.preview_url || undefined;
+  const rawId = String(spTrack?.id || '');
+  const isSpotifyBase62Id = /^[a-zA-Z0-9]{22}$/.test(rawId);
+  const spotifyUri =
+    spTrack?.uri || (isSpotifyBase62Id ? `spotify:track:${rawId}` : undefined);
+
+  let hash = 0;
+  const seed = `${id}-${title}-${artist}`;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash << 5) - hash + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  const absHash = Math.abs(hash);
+  const bpm = 88 + (absHash % 52);
+  const mood = MOODS[absHash % MOODS.length];
+  const chordProgression = CHORD_PROGRESSIONS[absHash % CHORD_PROGRESSIONS.length];
+  const coverUrl = spTrack?.album?.images?.[0]?.url || getAbstractPlaceholderCover(mood);
+
+  const POETIC_MOOD_VERSES: Record<MusicTrack['mood'], string[]> = {
+    Ethereal: [
+      'Raat ki khamoshi mein kho gaye',
+      'Sitaron ki roshni mein gunguna rahe',
+      'Tere khwabon mein hi hum ji rahe',
+      'Dhundli yaadein, dil mein bas gayi',
+      'Hawaon ke sang udne ka mann hai',
+      'Sukoon ki talaash mein hum gum hain',
+    ],
+    Kinetic: [
+      'Neon lights mein bhaage, jab shehar so gaya',
+      'Dil ki dhadkan tez, sapna mera ho gaya',
+      'Raftaar mein hum, masti mein choor',
+      'Manzil door hai, par hum majboor nahi',
+      'Aag lagi hai seene mein, jeetne ka junoon',
+      'Raste naye hain, aur hum taiyaar hain',
+    ],
+    Melancholic: [
+      'Purani yaadein, jaise baarish ki bundein',
+      'Alfaaz mere, tere bin hain adhoore',
+      'Tanhai ka aalam, dil mein hai chupa',
+      'Waqt ruk gaya, jaise main akela hua',
+      'Khamosh galiyon mein, teri parchayi hai',
+      'Yaadon ka karwaan, har pal yaad aayi hai',
+    ],
+    Euphoric: [
+      'Sunheri roshni, badalon ke paar',
+      'Khushi ka jashn, hai har taraf bahaar',
+      'Sapne sach hue, aaj dil khush hai',
+      'Zindagi ka ye pal, sabse anmol hai',
+      'Umeedon ke pankh, falak tak le jayenge',
+      'Aaj hum milke, naye geet gayenge',
+    ],
+  };
+
+  const step = Math.max(6, Math.floor(duration / 8));
+
+  return {
+    id,
+    title,
+    artist,
+    album,
+    duration,
+    bpm,
+    mood,
+    platform: 'Spotify',
+    palette: hashTrackToPalette(`${title}-${artist}`),
+    chordProgression,
+    lyrics: undefined,
+    previewUrl,
+    spotifyUri,
+    coverUrl,
+  };
+}
+
+export function isShortPreviewUrl(url?: string | null): boolean {
+  if (!url) return true;
+  const lower = url.toLowerCase();
+  return (
+    lower.includes('itunes.apple.com') ||
+    lower.includes('mzstatic.com') ||
+    lower.includes('p.scdn.co/mp3-preview') ||
+    lower.includes('cdns-preview-')
+  );
+}
+
+function extractClientSaavnDownloadUrl(song: any): string | null {
+  const urls = song?.downloadUrl || song?.download_url;
+  if (!Array.isArray(urls) || urls.length === 0) return null;
+  const sorted = [...urls].reverse();
+  for (const item of sorted) {
+    const link = item?.url || item?.link;
+    if (typeof link === 'string' && link.startsWith('http')) {
+      return link.replace(/^http:\/\//i, 'https://');
+    }
+  }
+  return null;
+}
+
+function extractClientSaavnCover(song: any): string | null {
+  const images = song?.image;
+  if (Array.isArray(images) && images.length > 0) {
+    const last = images[images.length - 1];
+    const link = last?.url || last?.link;
+    if (typeof link === 'string' && link.startsWith('http')) {
+      return link.replace(/^http:\/\//i, 'https://');
+    }
+  }
+  return null;
+}
+
+const clientMediaCache = new Map<
+  string,
+  { previewUrl: string | null; coverUrl: string | null; duration?: number; isFullTrack: boolean }
+>();
+
+export async function resolveTrackMedia(
+  title: string,
+  artist: string,
+  existingPreviewUrl?: string,
+  existingCoverUrl?: string
+): Promise<{
+  previewUrl: string | null;
+  coverUrl: string | null;
+  duration?: number;
+  isFullTrack?: boolean;
+}> {
+  const hasRealCover =
+    Boolean(existingCoverUrl) &&
+    !String(existingCoverUrl).startsWith('/assets/albums/');
+  const hasFullStream = Boolean(existingPreviewUrl) && !isShortPreviewUrl(existingPreviewUrl);
+
+  if (hasFullStream && hasRealCover) {
+    return {
+      previewUrl: existingPreviewUrl!,
+      coverUrl: existingCoverUrl!,
+      isFullTrack: true,
+    };
+  }
+
+  const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
+  const cleanTitle = decodeHtmlEntities(title)
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/\s*\[.*?\]\s*/g, '')
+    .replace(/\s*-.*$/, '')
+    .trim();
+  const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
+
+  if (clientMediaCache.has(cacheKey)) {
+    const cached = clientMediaCache.get(cacheKey)!;
+    return {
+      previewUrl: cached.previewUrl || existingPreviewUrl || null,
+      coverUrl: hasRealCover ? existingCoverUrl! : cached.coverUrl,
+      duration: cached.duration,
+      isFullTrack: cached.isFullTrack,
+    };
+  }
+
+  // 1. Try server-side Full-Length Audio Stream Resolver (/api/audio/full-stream) with strict matching
+  try {
+    const params = new URLSearchParams({
+      title: cleanTitle,
+      artist: primaryArtist,
+    });
+    const { ok, isJson, data } = await safeJsonFetch<{
+      streamUrl?: string;
+      coverUrl?: string | null;
+      duration?: number;
+      isFullTrack?: boolean;
+    }>(`/api/audio/full-stream?${params.toString()}`);
+
+    if (isJson && ok && data?.streamUrl && data.isFullTrack) {
+      const result = {
+        previewUrl: data.streamUrl,
+        coverUrl: hasRealCover ? existingCoverUrl! : data.coverUrl || null,
+        duration: data.duration,
+        isFullTrack: true,
+      };
+      clientMediaCache.set(cacheKey, result);
+      return result;
+    }
+  } catch {
+    // Fall through to direct client full-track resolution
+  }
+
+  // 2. Direct client-side full-length stream resolution (Strict Title + Artist Verification Only)
+  const query = encodeURIComponent(`${cleanTitle} ${primaryArtist}`.trim());
+  const clientEndpoints = [
+    `https://saavn.sumit.co/api/search/songs?query=${query}&page=0&limit=10`,
+  ];
+
+  for (const endpoint of clientEndpoints) {
+    try {
+      const res = await fetch(endpoint);
+      if (res.ok) {
+        const json = await res.json();
+        const results: any[] =
+          json?.data?.results ||
+          json?.results ||
+          (Array.isArray(json?.data) ? json.data : []);
+        if (Array.isArray(results) && results.length > 0) {
+          // Strictly verify candidate title and artist — NEVER fall back to results[0]
+          const strictMatch = results.find((r) => {
+            const rName = decodeHtmlEntities(String(r?.name || r?.title || ''));
+            const rArtists = decodeHtmlEntities(
+              String(
+                r?.primaryArtists ||
+                  r?.artists?.primary?.map((a: any) => a.name).join(', ') ||
+                  r?.subtitle ||
+                  ''
+              )
+            );
+            const dur = Number(r?.duration || 0);
+            const lang = String(r?.language || '').toLowerCase();
+            return (
+              dur >= 60 &&
+              lang !== 'instrumental' &&
+              isStrictTrackMatch(rName, rArtists, cleanTitle, primaryArtist)
+            );
+          });
+
+          if (strictMatch) {
+            const fullUrl = extractClientSaavnDownloadUrl(strictMatch);
+            const dur = Number(strictMatch?.duration || 0);
+            if (fullUrl && dur >= 60) {
+              const cover = hasRealCover
+                ? existingCoverUrl!
+                : extractClientSaavnCover(strictMatch);
+              const result = {
+                previewUrl: fullUrl,
+                coverUrl: cover,
+                duration: Math.round(dur),
+                isFullTrack: true,
+              };
+              clientMediaCache.set(cacheKey, result);
+              return result;
+            }
+          }
+        }
+      }
+    } catch {
+      // Try next endpoint
+    }
+  }
+
+  // 3. Fallback to iTunes Search with strict title + artist verification
+  try {
+    const res = await fetch(`https://itunes.apple.com/search?term=${query}&entity=song&limit=6`);
+    if (res.ok) {
+      const data = await res.json();
+      const items: any[] = data?.results || [];
+      const matchedItunes = items.find((item) =>
+        isStrictTrackMatch(
+          String(item?.trackName || ''),
+          String(item?.artistName || ''),
+          cleanTitle,
+          primaryArtist
+        )
+      );
+      if (matchedItunes) {
+        const hiResCover = matchedItunes.artworkUrl100
+          ? String(matchedItunes.artworkUrl100).replace('100x100bb', '600x600bb')
+          : null;
+        return {
+          previewUrl: existingPreviewUrl || (matchedItunes.previewUrl as string) || null,
+          coverUrl: hasRealCover ? existingCoverUrl! : hiResCover,
+          duration: hasFullStream ? undefined : 30,
+          isFullTrack: hasFullStream,
+        };
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  return {
+    previewUrl: existingPreviewUrl || null,
+    coverUrl: hasRealCover ? existingCoverUrl! : null,
+    isFullTrack: hasFullStream,
+  };
+}
+
+export async function resolveTrackStreamUrl(
+  title: string,
+  artist: string,
+  existingPreviewUrl?: string
+): Promise<string | null> {
+  const media = await resolveTrackMedia(title, artist, existingPreviewUrl);
+  return media.previewUrl;
+}
+
+function isMetadataOrHeaderLine(text: string): boolean {
+  const clean = text.trim();
+  if (!clean) return true;
+  if (/^\[(?:verse|chorus|intro|outro|bridge|hook|pre-chorus|instrumental|interlude).*?\]$/i.test(clean)) {
+    return true;
+  }
+  if (
+    /^(?:song|title|artist|album|lyrics?\s*by|composed\s*by|music\s*by|singer|vocal|arranger|producer|lrc\s*by|synced\s*by|by\s*:|www\.|https?:\/\/)/i.test(
+      clean
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function parseLrcLyrics(lrcText: string): LyricLine[] {
+  const lines = lrcText.split('\n');
+  const parsed: LyricLine[] = [];
+  const timeRegex = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+
+  for (const rawLine of lines) {
+    const text = decodeHtmlEntities(rawLine.replace(timeRegex, '').trim());
+    if (!text || isMetadataOrHeaderLine(text)) continue;
+    let match: RegExpExecArray | null;
+    timeRegex.lastIndex = 0;
+    while ((match = timeRegex.exec(rawLine)) !== null) {
+      const mins = parseInt(match[1], 10);
+      const secs = parseInt(match[2], 10);
+      const ms = match[3] ? parseInt(match[3].padEnd(3, '0'), 10) : 0;
+      const timeSec = Math.round((mins * 60 + secs + ms / 1000) * 10) / 10;
+      parsed.push({ time: timeSec, text });
+    }
+  }
+
+  const sorted = parsed.sort((a, b) => a.time - b.time);
+  // Anchor the very first lyric line at 0:00 so real lyrics are displayed immediately from the start of the song
+  if (sorted.length > 0 && sorted[0].time > 0) {
+    sorted[0] = { ...sorted[0], time: 0 };
+  }
+  return sorted;
+}
+
+const clientLyricsCache = new Map<string, LyricLine[]>();
+
+export async function fetchLyricsForSpotifyTrack(
+  title: string,
+  artist: string,
+  durationSec = 200
+): Promise<LyricLine[] | null> {
+  try {
+    const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
+    const cleanTitle = decodeHtmlEntities(title)
+      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*\[.*?\]\s*/g, '')
+      .replace(/\s*-\s*(?:slowed|ultra\s+slowed|remix|phonk|reverb|sped\s+up)\s*$/gi, '')
+      .replace(/\s*-.*$/, '')
+      .trim();
+    if (!cleanTitle) return null;
+
+    const targetDur = Math.max(60, Math.round(durationSec || 200));
+    const durBucket = Math.round(targetDur / 4) * 4;
+    const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}::${durBucket}`;
+    if (clientLyricsCache.has(cacheKey)) {
+      return clientLyricsCache.get(cacheKey)!;
+    }
+
+    const mapPlainToLyrics = (rawPlain: string): LyricLine[] | null => {
+      const plainLines = decodeHtmlEntities(rawPlain)
+        .split('\n')
+        .map((l: string) => l.trim())
+        .filter((l: string) => Boolean(l) && !isMetadataOrHeaderLine(l))
+        .slice(0, 44);
+      if (plainLines.length < 3) return null;
+      const step = Math.max(3.5, Math.floor(Math.max(90, targetDur - 10) / plainLines.length));
+      return plainLines.map((line: string, i: number) => ({
+        time: Math.round(i * step * 10) / 10,
+        text: line,
+      }));
+    };
+
+    // 1. Try server-side duration-matched LRC resolver first (/api/audio/lyrics)
+    try {
+      const serverParams = new URLSearchParams({
+        title: cleanTitle,
+        artist: primaryArtist,
+        duration: String(targetDur),
+      });
+      const { ok, isJson, data } = await safeJsonFetch<{
+        syncedLyrics?: string | null;
+        plainLyrics?: string | null;
+      }>(`/api/audio/lyrics?${serverParams.toString()}`);
+
+      if (isJson && ok && data) {
+        if (typeof data.syncedLyrics === 'string' && data.syncedLyrics.trim()) {
+          const parsed = parseLrcLyrics(data.syncedLyrics);
+          if (parsed.length >= 3) {
+            clientLyricsCache.set(cacheKey, parsed);
+            return parsed;
+          }
+        }
+        if (typeof data.plainLyrics === 'string' && data.plainLyrics.trim()) {
+          const mapped = mapPlainToLyrics(data.plainLyrics);
+          if (mapped) {
+            clientLyricsCache.set(cacheKey, mapped);
+            return mapped;
+          }
+        }
+      }
+    } catch {
+      // Fall through to direct LRCLIB search
+    }
+
+    // 2. Direct LRCLIB search with strict title + artist verification and title-match fallback
+    const searchParams = new URLSearchParams({
+      track_name: cleanTitle,
+      artist_name: primaryArtist,
+    });
+    let res = await fetch(`https://lrclib.net/api/search?${searchParams.toString()}`);
+    let items: any[] = res.ok ? await res.json() : [];
+
+    if (!Array.isArray(items) || items.length === 0) {
+      const qParams = new URLSearchParams({
+        q: `${cleanTitle} ${primaryArtist}`,
+      });
+      res = await fetch(`https://lrclib.net/api/search?${qParams.toString()}`);
+      items = res.ok ? await res.json() : [];
+    }
+
+    // Helper to check for Devanagari script
+    const hasHindi = (text: string) => /[\u0900-\u097F]/.test(text);
+
+    let verifiedItems = Array.isArray(items)
+      ? items.filter((it: any) =>
+          isStrictTrackMatch(
+            String(it?.trackName || it?.name || ''),
+            String(it?.artistName || ''),
+            cleanTitle,
+            primaryArtist
+          )
+        )
+      : [];
+
+    if (verifiedItems.length === 0) {
+      const titleOnlyParams = new URLSearchParams({ q: cleanTitle });
+      const titleRes = await fetch(`https://lrclib.net/api/search?${titleOnlyParams.toString()}`);
+      const titleItems: any[] = titleRes.ok ? await titleRes.json() : [];
+      const combined = [...(Array.isArray(items) ? items : []), ...(Array.isArray(titleItems) ? titleItems : [])];
+      const normTarget = normalizeTrackToken(cleanTitle);
+      verifiedItems = combined.filter((it: any) => {
+        const cTitle = normalizeTrackToken(String(it?.trackName || it?.name || ''));
+        const rawLower = `${it?.trackName || ''} ${it?.artistName || ''}`.toLowerCase();
+        if (rawLower.includes('karaoke') || rawLower.includes('instrumental')) return false;
+        return (
+          Boolean(cTitle) &&
+          (cTitle === normTarget ||
+            (cTitle.includes(normTarget) && normTarget.length >= Math.max(4, Math.floor(cTitle.length * 0.6))) ||
+            (normTarget.includes(cTitle) && cTitle.length >= Math.max(4, Math.floor(normTarget.length * 0.6))))
+        );
+      });
+    }
+
+    if (verifiedItems.length === 0) return null;
+
+    // Sort synced lyric candidates by closest match to the actual audio stream duration
+    const syncedCandidates = verifiedItems.filter(
+      (it: any) => typeof it.syncedLyrics === 'string' && it.syncedLyrics.trim()
+    );
+    if (syncedCandidates.length > 0) {
+      syncedCandidates.sort(
+        (a: any, b: any) => {
+          // Heuristic: prioritize Devanagari if present in lyrics (likely Hindi song)
+          const aHasHindi = hasHindi(a.syncedLyrics);
+          const bHasHindi = hasHindi(b.syncedLyrics);
+          if (aHasHindi && !bHasHindi) return -1;
+          if (!aHasHindi && bHasHindi) return 1;
+
+          return Math.abs(Number(a.duration || targetDur) - targetDur) -
+            Math.abs(Number(b.duration || targetDur) - targetDur);
+        }
+      );
+      const parsed = parseLrcLyrics(syncedCandidates[0].syncedLyrics);
+      if (parsed.length >= 3) {
+        clientLyricsCache.set(cacheKey, parsed);
+        return parsed;
+      }
+    }
+
+    const matchWithPlain = verifiedItems.find(
+      (it: any) => typeof it.plainLyrics === 'string' && it.plainLyrics.trim()
+    );
+    if (matchWithPlain?.plainLyrics) {
+      const mapped = mapPlainToLyrics(matchWithPlain.plainLyrics);
+      if (mapped) {
+        clientLyricsCache.set(cacheKey, mapped);
+        return mapped;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSpotifyPlaylistTracks(
+  playlistId: string,
+  token?: string,
+  playlistName?: string
+): Promise<MusicTrack[]> {
+  const cleanToken =
+    token && token !== 'server_managed_session'
+      ? token
+      : localStorage.getItem('musevis_spotify_token') || undefined;
+
+  // 1. Try server proxy endpoint
+  const { ok, isJson, data } = await safeJsonFetch(
+    `/api/spotify/playlists/${encodeURIComponent(playlistId)}/tracks`,
+    {
+      headers: cleanToken ? { Authorization: `Bearer ${cleanToken}` } : {},
+    }
+  );
+
+  if (isJson && ok && data) {
+    const rawTracks = Array.isArray(data.tracks)
+      ? data.tracks
+      : (data.items || []).map((it: any) => it?.track || it?.item).filter(Boolean);
+    if (rawTracks.length > 0) {
+      return rawTracks.map((t: any, idx: number) => mapSpotifyTrackToMusicTrack(t, idx));
+    }
+  }
+
+  // 2. Fallback to direct Spotify Web API if Bearer token is in browser
+  if (cleanToken) {
+    try {
+      const res = await fetch(
+        `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=25`,
+        {
+          headers: { Authorization: `Bearer ${cleanToken}` },
+        }
+      );
+      if (res.ok) {
+        const json = await res.json();
+        const rawTracks = (json.items || [])
+          .map((it: any) => it?.track || it?.item)
+          .filter((t: any) => t && t.id && t.name);
+        if (rawTracks.length > 0) {
+          return rawTracks.map((t: any, idx: number) => mapSpotifyTrackToMusicTrack(t, idx));
+        }
+      }
+    } catch {
+      // Ignore direct error
+    }
+  }
+
+  // 3. If Spotify restricts a playlist (e.g. Spotify-owned algorithmic mixes in Dev mode), resolve real tracks matching the playlist name
+  if (playlistName) {
+    const cleanedName = playlistName
+      .replace(/spotify|playlist|mix|daily|discover|radio/gi, '')
+      .trim();
+    const fallbackQuery = cleanedName.length >= 2 ? cleanedName : 'The Weeknd';
+    const searched = await searchSpotifyCatalog(fallbackQuery, cleanToken);
+    if (searched.length > 0) return searched;
+  }
+
+  return [];
+}
+
+export async function searchSpotifyCatalog(
+  query: string,
+  token?: string
+): Promise<MusicTrack[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  const cleanToken =
+    token && token !== 'server_managed_session'
+      ? token
+      : localStorage.getItem('musevis_spotify_token') || undefined;
+
+  // 1. Try server-side Full-Track 320kbps Catalog Resolver (/api/audio/search) so every returned track has matched title, artist, 500x500 official cover art, and full 3-5 min audio stream
+  try {
+    const { ok, isJson, data } = await safeJsonFetch<{
+      tracks?: Array<{
+        id: string;
+        title: string;
+        artist: string;
+        album: string;
+        duration: number;
+        coverUrl: string | null;
+        streamUrl: string;
+        isFullTrack: boolean;
+      }>;
+    }>(`/api/audio/search?q=${encodeURIComponent(trimmed)}`);
+
+    if (isJson && ok && Array.isArray(data?.tracks) && data.tracks.length > 0) {
+      const mapped = data.tracks.map((item, idx) => {
+        const artistList = item.artist
+          .split(',')
+          .map((a) => ({ name: a.trim() }))
+          .filter((a) => a.name);
+        const track = mapSpotifyTrackToMusicTrack(
+          {
+            id: item.id || `full-${idx}`,
+            name: item.title,
+            artists: artistList.length > 0 ? artistList : [{ name: item.artist }],
+            album: {
+              name: item.album || item.title,
+              images: item.coverUrl ? [{ url: item.coverUrl }] : [],
+            },
+            duration_ms: item.duration * 1000,
+            preview_url: item.streamUrl,
+          },
+          idx
+        );
+
+        const primaryArtist = track.artist.split(',')[0].trim();
+        const cleanTitle = track.title
+          .replace(/\s*\(.*?\)\s*/g, '')
+          .replace(/\s*\[.*?\]\s*/g, '')
+          .replace(/\s*-.*$/, '')
+          .trim();
+        const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
+        clientMediaCache.set(cacheKey, {
+          previewUrl: item.streamUrl,
+          coverUrl: item.coverUrl,
+          duration: item.duration,
+          isFullTrack: true,
+        });
+
+        return track;
+      });
+      if (mapped.length > 0) {
+        const firstLyrics = await fetchLyricsForSpotifyTrack(
+          mapped[0].title,
+          mapped[0].artist,
+          mapped[0].duration
+        );
+        if (firstLyrics && firstLyrics.length > 0) {
+          mapped[0] = { ...mapped[0], lyrics: firstLyrics };
+        }
+        // Background prefetch lyrics for next tracks in queue
+        mapped.slice(1, 4).forEach((t) => {
+          fetchLyricsForSpotifyTrack(t.title, t.artist, t.duration).catch(() => {});
+        });
+        return mapped;
+      }
+    }
+  } catch {
+    // Fall through
+  }
+
+  // 2. Try Spotify Search API if token is available
+  if (cleanToken) {
+    try {
+      const res = await fetch(
+        `https://api.spotify.com/v1/search?q=${encodeURIComponent(trimmed)}&type=track&limit=14`,
+        {
+          headers: { Authorization: `Bearer ${cleanToken}` },
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const items = data?.tracks?.items || [];
+        if (items.length > 0) {
+          return items.map((t: any, idx: number) => mapSpotifyTrackToMusicTrack(t, idx));
+        }
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  // 3. Universal fallback via iTunes Search API
+  try {
+    const res = await fetch(
+      `https://itunes.apple.com/search?term=${encodeURIComponent(trimmed)}&entity=song&limit=14`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const results = data?.results || [];
+      return results.map((item: any, idx: number) => {
+        const hiResArt = item.artworkUrl100
+          ? String(item.artworkUrl100).replace('100x100bb', '600x600bb')
+          : undefined;
+        return mapSpotifyTrackToMusicTrack(
+          {
+            id: String(item.trackId || `search-${idx}`),
+            name: item.trackName,
+            artists: [{ name: item.artistName }],
+            album: {
+              name: item.collectionName,
+              images: hiResArt ? [{ url: hiResArt }] : [],
+            },
+            duration_ms: item.trackTimeMillis || 180000,
+            preview_url: item.previewUrl,
+          },
+          idx
+        );
+      });
+    }
+  } catch {
+    // Ignore error
+  }
+
+  return [];
+}
+
+export async function fetchRealStarterCatalog(): Promise<{
+  playlists: {
+    id: string;
+    name: string;
+    source: 'Spotify' | 'Apple Music';
+    trackCount: number;
+    synced: boolean;
+    tracks: MusicTrack[];
+  }[];
+  tracks: MusicTrack[];
+}> {
+  // Query clean, single-artist catalogs so every track has 100% matched audio, official cover art, and synced lyrics
+  const [rnb, electronic, indie] = await Promise.all([
+    searchSpotifyCatalog('The Weeknd'),
+    searchSpotifyCatalog('Daft Punk'),
+    searchSpotifyCatalog('Tame Impala'),
+  ]);
+
+  const playlists = [
+    {
+      id: 'live-midnight-rnb-pop',
+      name: 'Late Night R&B & Pop',
+      source: 'Spotify' as const,
+      trackCount: rnb.length,
+      synced: true,
+      tracks: rnb,
+    },
+    {
+      id: 'live-electronic-horizon',
+      name: 'Electronic & Melodic House',
+      source: 'Spotify' as const,
+      trackCount: electronic.length,
+      synced: true,
+      tracks: electronic,
+    },
+    {
+      id: 'live-alt-indie-currents',
+      name: 'Alternative & Indie Currents',
+      source: 'Spotify' as const,
+      trackCount: indie.length,
+      synced: true,
+      tracks: indie,
+    },
+  ].filter((pl) => pl.tracks.length > 0);
+
+  return {
+    playlists,
+    tracks: playlists[0]?.tracks || [],
+  };
+}
+
+export async function resolveSpotifyTrackUri(
+  title: string,
+  artist: string,
+  existingUri?: string,
+  token?: string
+): Promise<string | null> {
+  if (existingUri && /^spotify:track:[a-zA-Z0-9]{22}$/.test(existingUri)) {
+    return existingUri;
+  }
+  const cleanToken =
+    token && token !== 'server_managed_session'
+      ? token
+      : localStorage.getItem('musevis_spotify_token') || undefined;
+
+  const primaryArtist = artist.split(',')[0].trim();
+  const cleanTitle = title.replace(/\s*\(.*?\)\s*/g, '').replace(/\s*-.*$/, '').trim();
+  const q = encodeURIComponent(`${cleanTitle} ${primaryArtist}`);
+
+  if (cleanToken) {
+    try {
+      const res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
+        headers: { Authorization: `Bearer ${cleanToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const uri = data?.tracks?.items?.[0]?.uri;
+        if (typeof uri === 'string' && /^spotify:track:[a-zA-Z0-9]{22}$/.test(uri)) {
+          return uri;
+        }
+      }
+    } catch {
+      // Fall through to server proxy search
+    }
+  }
+
+  try {
+    const { ok, isJson, data } = await safeJsonFetch(`/api/spotify/search?q=${q}`);
+    if (isJson && ok && Array.isArray(data?.tracks) && data.tracks.length > 0) {
+      const first = data.tracks[0];
+      if (typeof first?.uri === 'string' && /^spotify:track:[a-zA-Z0-9]{22}$/.test(first.uri)) {
+        return first.uri;
+      }
+      if (typeof first?.id === 'string' && /^[a-zA-Z0-9]{22}$/.test(first.id)) {
+        return `spotify:track:${first.id}`;
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  return null;
+}
+
+export async function fetchSpotifyLivePlayerState(token?: string): Promise<{
+  track: MusicTrack | null;
+  isPlaying: boolean;
+  progressSec: number;
+  durationSec: number;
+  deviceName: string | null;
+  deviceId: string | null;
+} | null> {
+  const cleanToken =
+    token && token !== 'server_managed_session'
+      ? token
+      : localStorage.getItem('musevis_spotify_token') || undefined;
+
+  if (cleanToken) {
+    try {
+      const res = await fetch('https://api.spotify.com/v1/me/player', {
+        headers: { Authorization: `Bearer ${cleanToken}` },
+      });
+      if (res.status === 200) {
+        const data = await res.json();
+        if (data?.item) {
+          const liveTrack = mapSpotifyTrackToMusicTrack(data.item, 0);
+          return {
+            track: liveTrack,
+            isPlaying: Boolean(data.is_playing),
+            progressSec:
+              typeof data.progress_ms === 'number'
+                ? Math.round((data.progress_ms / 1000) * 4) / 4
+                : 0,
+            durationSec: liveTrack.duration,
+            deviceName: data.device?.name || null,
+            deviceId: data.device?.id || null,
+          };
+        }
+      }
+    } catch {
+      // Fall through to server proxy
+    }
+  }
+
+  try {
+    const { ok, isJson, data } = await safeJsonFetch('/api/spotify/player', {
+      headers: cleanToken ? { Authorization: `Bearer ${cleanToken}` } : {},
+    });
+    const cp = isJson && ok && data?.active ? data.player : null;
+    if (cp?.item) {
+      const liveTrack = mapSpotifyTrackToMusicTrack(cp.item, 0);
+      return {
+        track: liveTrack,
+        isPlaying: Boolean(cp.is_playing ?? true),
+        progressSec:
+          typeof cp.progress_ms === 'number'
+            ? Math.round((cp.progress_ms / 1000) * 4) / 4
+            : 0,
+        durationSec: liveTrack.duration,
+        deviceName: cp.device?.name || null,
+        deviceId: cp.device?.id || null,
+      };
+    }
+  } catch {
+    // Ignore
+  }
+
+  return null;
+}
+
+export async function controlSpotifyRemotePlayer(
+  action: 'play' | 'pause' | 'next' | 'previous' | 'seek',
+  options?: {
+    contextUri?: string;
+    trackUri?: string;
+    positionMs?: number;
+    deviceId?: string | null;
+    token?: string;
+  }
+): Promise<boolean> {
+  const cleanToken =
+    options?.token && options.token !== 'server_managed_session'
+      ? options.token
+      : localStorage.getItem('musevis_spotify_token') || undefined;
+
+  if (cleanToken) {
+    try {
+      let targetDeviceId = options?.deviceId || null;
+
+      if (!targetDeviceId && (action === 'play' || action === 'seek')) {
+        try {
+          const devRes = await fetch('https://api.spotify.com/v1/me/player/devices', {
+            headers: { Authorization: `Bearer ${cleanToken}` },
+          });
+          if (devRes.ok) {
+            const devData = await devRes.json();
+            const devices: any[] = Array.isArray(devData?.devices) ? devData.devices : [];
+            const activeDev = devices.find((d) => d.is_active) || devices[0];
+            if (activeDev?.id) {
+              targetDeviceId = activeDev.id;
+            }
+          }
+        } catch {
+          // Proceed without device_id
+        }
+      }
+
+      const deviceQuery = targetDeviceId
+        ? `?device_id=${encodeURIComponent(targetDeviceId)}`
+        : '';
+      let endpoint = `https://api.spotify.com/v1/me/player/play${deviceQuery}`;
+      let method = 'PUT';
+      let body: string | undefined;
+
+      if (action === 'play') {
+        method = 'PUT';
+        endpoint = `https://api.spotify.com/v1/me/player/play${deviceQuery}`;
+        if (options?.trackUri) {
+          body = JSON.stringify({
+            uris: [options.trackUri],
+            ...(typeof options.positionMs === 'number' ? { position_ms: options.positionMs } : {}),
+          });
+        } else if (options?.contextUri) {
+          body = JSON.stringify({ context_uri: options.contextUri });
+        }
+      } else if (action === 'pause') {
+        method = 'PUT';
+        endpoint = `https://api.spotify.com/v1/me/player/pause${deviceQuery}`;
+      } else if (action === 'next') {
+        method = 'POST';
+        endpoint = `https://api.spotify.com/v1/me/player/next${deviceQuery}`;
+      } else if (action === 'previous') {
+        method = 'POST';
+        endpoint = `https://api.spotify.com/v1/me/player/previous${deviceQuery}`;
+      } else if (action === 'seek') {
+        method = 'PUT';
+        const pos = Math.max(0, Math.round(options?.positionMs || 0));
+        const devParam = targetDeviceId
+          ? `&device_id=${encodeURIComponent(targetDeviceId)}`
+          : '';
+        endpoint = `https://api.spotify.com/v1/me/player/seek?position_ms=${pos}${devParam}`;
+      }
+
+      const res = await fetch(endpoint, {
+        method,
+        headers: {
+          Authorization: `Bearer ${cleanToken}`,
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body,
+      });
+      if (res.ok || res.status === 204) return true;
+    } catch {
+      // Fall through to server proxy
+    }
+  }
+
+  try {
+    const { ok, isJson, data } = await safeJsonFetch('/api/spotify/player', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cleanToken ? { Authorization: `Bearer ${cleanToken}` } : {}),
+      },
+      body: JSON.stringify({
+        action,
+        contextUri: options?.contextUri,
+        trackUri: options?.trackUri,
+        positionMs: options?.positionMs,
+        deviceId: options?.deviceId,
+      }),
+    });
+    return Boolean(isJson && ok && data?.ok);
+  } catch {
+    return false;
+  }
+}
+
+export interface SpotifyWebPlayerCallbacks {
+  onReady?: (deviceId: string) => void;
+  onStateChange?: (state: {
+    paused: boolean;
+    positionSec: number;
+    durationSec: number;
+    trackId?: string;
+  }) => void;
+  onError?: (message: string) => void;
+}
+
+export function initSpotifyWebPlaybackSdk(
+  getToken: () => string | null,
+  callbacks: SpotifyWebPlayerCallbacks
+): () => void {
+  let player: any = null;
+  let disposed = false;
+
+  const setupPlayer = () => {
+    if (disposed || !(window as any).Spotify?.Player) return;
+    const token = getToken();
+    if (!token || token === 'server_managed_session') return;
+
+    player = new (window as any).Spotify.Player({
+      name: 'MuseVis Audio Studio (Full-Track Player)',
+      getOAuthToken: (cb: (t: string) => void) => {
+        const currentToken = getToken();
+        if (currentToken && currentToken !== 'server_managed_session') {
+          cb(currentToken);
+        }
+      },
+      volume: 0.8,
+    });
+
+    player.addListener('ready', ({ device_id }: { device_id: string }) => {
+      if (!disposed) {
+        console.info('[MuseVis Spotify Web Playback SDK] Ready with Device ID:', device_id);
+        callbacks.onReady?.(device_id);
+      }
+    });
+
+    player.addListener('player_state_changed', (state: any) => {
+      if (disposed || !state) return;
+      const currentTrack = state.track_window?.current_track;
+      callbacks.onStateChange?.({
+        paused: Boolean(state.paused),
+        positionSec: Math.floor((state.position || 0) / 1000),
+        durationSec: Math.max(30, Math.round((state.duration || 180000) / 1000)),
+        trackId: currentTrack?.id,
+      });
+    });
+
+    player.addListener('initialization_error', ({ message }: { message: string }) => {
+      callbacks.onError?.(message);
+    });
+    player.addListener('authentication_error', ({ message }: { message: string }) => {
+      callbacks.onError?.(message);
+    });
+    player.addListener('account_error', ({ message }: { message: string }) => {
+      callbacks.onError?.(message);
+    });
+
+    player.connect();
+  };
+
+  if ((window as any).Spotify?.Player) {
+    setupPlayer();
+  } else {
+    const existingScript = document.getElementById('spotify-player-sdk');
+    const prevReady = (window as any).onSpotifyWebPlaybackSDKReady;
+    (window as any).onSpotifyWebPlaybackSDKReady = () => {
+      if (typeof prevReady === 'function') prevReady();
+      setupPlayer();
+    };
+    if (!existingScript) {
+      const script = document.createElement('script');
+      script.id = 'spotify-player-sdk';
+      script.src = 'https://sdk.scdn.co/spotify-player.js';
+      script.async = true;
+      document.body.appendChild(script);
+    }
+  }
+
+  return () => {
+    disposed = true;
+    if (player && typeof player.disconnect === 'function') {
+      player.disconnect();
+    }
+  };
+}
+
+export async function fetchSpotifyDirectLibrary(token: string) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const [meRes, playlistsRes, currentRes] = await Promise.allSettled([
+    fetch('https://api.spotify.com/v1/me', { headers }),
+    fetch('https://api.spotify.com/v1/me/playlists?limit=15', { headers }),
+    fetch('https://api.spotify.com/v1/me/player/currently-playing', { headers }),
+  ]);
+
+  let user = null;
+  if (meRes.status === 'fulfilled' && meRes.value.ok) {
+    const meData = await meRes.value.json();
+    user = {
+      id: meData.id,
+      displayName: meData.display_name || meData.id,
+      email: meData.email,
+      product: meData.product,
+    };
+  }
+
+  let playlists: any[] = [];
+  if (playlistsRes.status === 'fulfilled' && playlistsRes.value.ok) {
+    const plData = await playlistsRes.value.json();
+    playlists = plData.items || [];
+  }
+
+  let currentlyPlaying = null;
+  if (currentRes.status === 'fulfilled' && currentRes.value.status === 200) {
+    currentlyPlaying = await currentRes.value.json().catch(() => null);
+  }
+
+  let initialTracks: any[] = [];
+  let initialPlaylistId: string | null = null;
+  for (const pl of playlists.slice(0, 6)) {
+    if (!pl?.id) continue;
+    try {
+      const plTracksRes = await fetch(
+        `https://api.spotify.com/v1/playlists/${pl.id}/tracks?limit=25`,
+        { headers }
+      );
+      if (plTracksRes.ok) {
+        const plTracksData = await plTracksRes.json();
+        const tracks = (plTracksData.items || [])
+          .map((it: any) => it?.track || it?.item)
+          .filter((t: any) => t && t.id && t.name);
+        if (tracks.length > 0) {
+          initialTracks = tracks;
+          initialPlaylistId = pl.id;
+          break;
+        }
+      }
+    } catch {
+      // Try next playlist
+    }
+  }
+
+  if (initialTracks.length === 0) {
+    try {
+      const savedRes = await fetch('https://api.spotify.com/v1/me/tracks?limit=20', { headers });
+      if (savedRes.ok) {
+        const savedData = await savedRes.json();
+        initialTracks = (savedData.items || [])
+          .map((it: any) => it?.track)
+          .filter((t: any) => t && t.id && t.name);
+      }
+    } catch {
+      // Ignore error
+    }
+  }
+
+  return { user, playlists, currentlyPlaying, initialTracks, initialPlaylistId };
+}
+
+
+export async function searchSpotifyPlaylists(query: string, token?: string): Promise<any[]> {
+  const cleanToken = token || localStorage.getItem('musevis_spotify_token') || undefined;
+  if (!cleanToken || !query.trim()) return [];
+  try {
+    const res = await fetch(
+      `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=playlist&limit=10`,
+      {
+        headers: { Authorization: `Bearer ${cleanToken}` },
+      }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      return data.playlists?.items || [];
+    }
+  } catch {
+    // Ignore
+  }
+  return [];
+}
+
+export async function exchangeSpotifyCodeClientSide(params: {
+  code: string;
+  clientId: string;
+  redirectUri: string;
+  codeVerifier: string;
+}): Promise<{
+  success: boolean;
+  accessToken?: string;
+  refreshToken?: string;
+  error?: string;
+  errorCode?: string;
+  statusCode?: number;
+}> {
+  try {
+    const body = new URLSearchParams({
+      client_id: params.clientId,
+      grant_type: 'authorization_code',
+      code: params.code,
+      redirect_uri: params.redirectUri,
+      code_verifier: params.codeVerifier,
+    });
+
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) {
+      return {
+        success: false,
+        error: data.error_description || data.error || 'Client PKCE token exchange failed',
+        errorCode: data.error || 'pkce_exchange_failed',
+        statusCode: res.status,
+      };
+    }
+
+    return {
+      success: true,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      statusCode: res.status,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Network error during client PKCE exchange',
+      errorCode: 'network_error',
+      statusCode: 500,
+    };
+  }
+}

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" width="600" height="600">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#0a2e24"/>
+      <stop offset="55%" stop-color="#061512"/>
+      <stop offset="100%" stop-color="#050608"/>
+    </radialGradient>
+    <radialGradient id="orb1" cx="35%" cy="35%" r="55%">
+      <stop offset="0%" stop-color="#6EE7B7" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#1DB954" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb2" cx="68%" cy="62%" r="50%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.85"/>
+      <stop offset="55%" stop-color="#0EA5E9" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#051B14" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ribbon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6EE7B7" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#1DB954" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.85"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="24" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <circle cx="230" cy="240" r="210" fill="url(#orb1)" filter="url(#glow)"/>
+  <circle cx="390" cy="370" r="190" fill="url(#orb2)" filter="url(#glow)"/>
+  <path d="M 60 360 C 170 160, 320 490, 540 220 C 440 440, 240 240, 90 450 Z" fill="url(#ribbon)" opacity="0.78"/>
+  <path d="M 110 180 C 260 340, 360 110, 500 340 C 370 430, 240 260, 110 180 Z" fill="none" stroke="#6EE7B7" stroke-width="2.5" stroke-opacity="0.45"/>
+  <circle cx="300" cy="300" r="145" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.14"/>
+  <circle cx="300" cy="300" r="215" fill="none" stroke="#6EE7B7" stroke-width="0.75" stroke-opacity="0.18" stroke-dasharray="6 10"/>
+</svg>

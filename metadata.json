@@ -1,0 +1,6 @@
+{
+  "name": "MuseVis Audio",
+  "description": "An immersive audio-visual music experience with dynamic lyrics visualization and ambient lighting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

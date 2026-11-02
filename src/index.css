@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --background: #06070a;
+    --foreground: #f8fafc;
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-serif: 'Instrument Serif', Georgia, serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+.font-editorial {
+  font-family: var(--font-serif);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Sleek Dark Studio Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+@keyframes eqPulse1 {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+@keyframes eqPulse2 {
+  0%, 100% { transform: scaleY(0.85); }
+  35% { transform: scaleY(0.25); }
+  70% { transform: scaleY(1); }
+}
+@keyframes eqPulse3 {
+  0%, 100% { transform: scaleY(0.45); }
+  40% { transform: scaleY(0.95); }
+  80% { transform: scaleY(0.2); }
+}
+
+.animate-eq-1 {
+  animation: eqPulse1 0.75s ease-in-out infinite;
+  transform-origin: bottom;
+}
+.animate-eq-2 {
+  animation: eqPulse2 0.62s ease-in-out infinite;
+  transform-origin: bottom;
+}
+.animate-eq-3 {
+  animation: eqPulse3 0.88s ease-in-out infinite;
+  transform-origin: bottom;
+}
+
