@@ -249,8 +249,8 @@ const clientMediaCache = new Map<
 >();
 
 export async function resolveTrackMedia(
-  title: string,
-  artist: string,
+  _title: string,
+  _artist: string,
   existingPreviewUrl?: string,
   existingCoverUrl?: string
 ): Promise<{
@@ -259,158 +259,11 @@ export async function resolveTrackMedia(
   duration?: number;
   isFullTrack?: boolean;
 }> {
-  const hasRealCover =
-    Boolean(existingCoverUrl) &&
-    !String(existingCoverUrl).startsWith('/assets/albums/');
-  const hasFullStream = Boolean(existingPreviewUrl) && !isShortPreviewUrl(existingPreviewUrl);
-
-  if (hasFullStream && hasRealCover) {
-    return {
-      previewUrl: existingPreviewUrl!,
-      coverUrl: existingCoverUrl!,
-      isFullTrack: true,
-    };
-  }
-
-  const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
-  const cleanTitle = decodeHtmlEntities(title)
-    .replace(/\s*\(.*?\)\s*/g, '')
-    .replace(/\s*\[.*?\]\s*/g, '')
-    .replace(/\s*-.*$/, '')
-    .trim();
-  const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}`;
-
-  if (clientMediaCache.has(cacheKey)) {
-    const cached = clientMediaCache.get(cacheKey)!;
-    return {
-      previewUrl: cached.previewUrl || existingPreviewUrl || null,
-      coverUrl: hasRealCover ? existingCoverUrl! : cached.coverUrl,
-      duration: cached.duration,
-      isFullTrack: cached.isFullTrack,
-    };
-  }
-
-  // 1. Try server-side Full-Length Audio Stream Resolver (/api/audio/full-stream) with strict matching
-  try {
-    const params = new URLSearchParams({
-      title: cleanTitle,
-      artist: primaryArtist,
-    });
-    const { ok, isJson, data } = await safeJsonFetch<{
-      streamUrl?: string;
-      coverUrl?: string | null;
-      duration?: number;
-      isFullTrack?: boolean;
-    }>(`/api/audio/full-stream?${params.toString()}`);
-
-    if (isJson && ok && data?.streamUrl && data.isFullTrack) {
-      const result = {
-        previewUrl: data.streamUrl,
-        coverUrl: hasRealCover ? existingCoverUrl! : data.coverUrl || null,
-        duration: data.duration,
-        isFullTrack: true,
-      };
-      clientMediaCache.set(cacheKey, result);
-      return result;
-    }
-  } catch {
-    // Fall through to direct client full-track resolution
-  }
-
-  // 2. Direct client-side full-length stream resolution (Strict Title + Artist Verification Only)
-  const query = encodeURIComponent(`${cleanTitle} ${primaryArtist}`.trim());
-  const clientEndpoints = [
-    `https://saavn.sumit.co/api/search/songs?query=${query}&page=0&limit=10`,
-  ];
-
-  for (const endpoint of clientEndpoints) {
-    try {
-      const res = await fetch(endpoint);
-      if (res.ok) {
-        const json = await res.json();
-        const results: any[] =
-          json?.data?.results ||
-          json?.results ||
-          (Array.isArray(json?.data) ? json.data : []);
-        if (Array.isArray(results) && results.length > 0) {
-          // Strictly verify candidate title and artist — NEVER fall back to results[0]
-          const strictMatch = results.find((r) => {
-            const rName = decodeHtmlEntities(String(r?.name || r?.title || ''));
-            const rArtists = decodeHtmlEntities(
-              String(
-                r?.primaryArtists ||
-                  r?.artists?.primary?.map((a: any) => a.name).join(', ') ||
-                  r?.subtitle ||
-                  ''
-              )
-            );
-            const dur = Number(r?.duration || 0);
-            const lang = String(r?.language || '').toLowerCase();
-            return (
-              dur >= 60 &&
-              lang !== 'instrumental' &&
-              isStrictTrackMatch(rName, rArtists, cleanTitle, primaryArtist)
-            );
-          });
-
-          if (strictMatch) {
-            const fullUrl = extractClientSaavnDownloadUrl(strictMatch);
-            const dur = Number(strictMatch?.duration || 0);
-            if (fullUrl && dur >= 60) {
-              const cover = hasRealCover
-                ? existingCoverUrl!
-                : extractClientSaavnCover(strictMatch);
-              const result = {
-                previewUrl: fullUrl,
-                coverUrl: cover,
-                duration: Math.round(dur),
-                isFullTrack: true,
-              };
-              clientMediaCache.set(cacheKey, result);
-              return result;
-            }
-          }
-        }
-      }
-    } catch {
-      // Try next endpoint
-    }
-  }
-
-  // 3. Fallback to iTunes Search with strict title + artist verification
-  try {
-    const res = await fetch(`https://itunes.apple.com/search?term=${query}&entity=song&limit=6`);
-    if (res.ok) {
-      const data = await res.json();
-      const items: any[] = data?.results || [];
-      const matchedItunes = items.find((item) =>
-        isStrictTrackMatch(
-          String(item?.trackName || ''),
-          String(item?.artistName || ''),
-          cleanTitle,
-          primaryArtist
-        )
-      );
-      if (matchedItunes) {
-        const hiResCover = matchedItunes.artworkUrl100
-          ? String(matchedItunes.artworkUrl100).replace('100x100bb', '600x600bb')
-          : null;
-        return {
-          previewUrl: existingPreviewUrl || (matchedItunes.previewUrl as string) || null,
-          coverUrl: hasRealCover ? existingCoverUrl! : hiResCover,
-          duration: hasFullStream ? undefined : 30,
-          isFullTrack: hasFullStream,
-        };
-      }
-    }
-  } catch {
-    // Ignore
-  }
-
+  // Spotify metadata must never be paired with audio resolved from unrelated third-party catalogs.
   return {
     previewUrl: existingPreviewUrl || null,
-    coverUrl: hasRealCover ? existingCoverUrl! : null,
-    isFullTrack: hasFullStream,
+    coverUrl: existingCoverUrl || null,
+    isFullTrack: false,
   };
 }
 
@@ -474,154 +327,44 @@ export async function fetchLyricsForSpotifyTrack(
   durationSec = 200
 ): Promise<LyricLine[] | null> {
   try {
-    const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
     const cleanTitle = decodeHtmlEntities(title)
-      .replace(/\s*\(.*?\)\s*/g, '')
-      .replace(/\s*\[.*?\]\s*/g, '')
-      .replace(/\s*-\s*(?:slowed|ultra\s+slowed|remix|phonk|reverb|sped\s+up)\s*$/gi, '')
-      .replace(/\s*-.*$/, '')
+      .replace(/\\s*\\(.*?\\)\\s*/g, '')
+      .replace(/\\s*\\[.*?\\]\\s*/g, '')
       .trim();
-    if (!cleanTitle) return null;
+    const primaryArtist = decodeHtmlEntities(artist).split(',')[0].trim();
+    if (!cleanTitle || !primaryArtist) return null;
 
-    const targetDur = Math.max(60, Math.round(durationSec || 200));
-    const durBucket = Math.round(targetDur / 4) * 4;
-    const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}::${durBucket}`;
-    if (clientLyricsCache.has(cacheKey)) {
-      return clientLyricsCache.get(cacheKey)!;
-    }
+    const targetDuration = Math.max(30, Math.round(durationSec || 200));
+    const cacheKey = `${cleanTitle.toLowerCase()}::${primaryArtist.toLowerCase()}::${Math.round(targetDuration / 4) * 4}`;
+    if (clientLyricsCache.has(cacheKey)) return clientLyricsCache.get(cacheKey)!;
 
-    const mapPlainToLyrics = (rawPlain: string): LyricLine[] | null => {
-      const plainLines = decodeHtmlEntities(rawPlain)
-        .split('\n')
-        .map((l: string) => l.trim())
-        .filter((l: string) => Boolean(l) && !isMetadataOrHeaderLine(l))
-        .slice(0, 44);
-      if (plainLines.length < 3) return null;
-      const step = Math.max(3.5, Math.floor(Math.max(90, targetDur - 10) / plainLines.length));
-      return plainLines.map((line: string, i: number) => ({
-        time: Math.round(i * step * 10) / 10,
-        text: line,
-      }));
-    };
+    const params = new URLSearchParams({ track_name: cleanTitle, artist_name: primaryArtist });
+    const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`);
+    if (!response.ok) return null;
+    const items: any[] = await response.json();
+    if (!Array.isArray(items)) return null;
 
-    // 1. Try server-side duration-matched LRC resolver first (/api/audio/lyrics)
-    try {
-      const serverParams = new URLSearchParams({
-        title: cleanTitle,
-        artist: primaryArtist,
-        duration: String(targetDur),
-      });
-      const { ok, isJson, data } = await safeJsonFetch<{
-        syncedLyrics?: string | null;
-        plainLyrics?: string | null;
-      }>(`/api/audio/lyrics?${serverParams.toString()}`);
-
-      if (isJson && ok && data) {
-        if (typeof data.syncedLyrics === 'string' && data.syncedLyrics.trim()) {
-          const parsed = parseLrcLyrics(data.syncedLyrics);
-          if (parsed.length >= 3) {
-            clientLyricsCache.set(cacheKey, parsed);
-            return parsed;
-          }
-        }
-        if (typeof data.plainLyrics === 'string' && data.plainLyrics.trim()) {
-          const mapped = mapPlainToLyrics(data.plainLyrics);
-          if (mapped) {
-            clientLyricsCache.set(cacheKey, mapped);
-            return mapped;
-          }
-        }
-      }
-    } catch {
-      // Fall through to direct LRCLIB search
-    }
-
-    // 2. Direct LRCLIB search with strict title + artist verification and title-match fallback
-    const searchParams = new URLSearchParams({
-      track_name: cleanTitle,
-      artist_name: primaryArtist,
+    const candidates = items.filter((item: any) => {
+      if (!item?.syncedLyrics || typeof item.syncedLyrics !== 'string') return false;
+      if (!isStrictTrackMatch(
+        String(item.trackName || ''),
+        String(item.artistName || ''),
+        cleanTitle,
+        primaryArtist
+      )) return false;
+      const candidateDuration = Number(item.duration || 0);
+      return !candidateDuration || Math.abs(candidateDuration - targetDuration) <= Math.max(10, targetDuration * 0.08);
     });
-    let res = await fetch(`https://lrclib.net/api/search?${searchParams.toString()}`);
-    let items: any[] = res.ok ? await res.json() : [];
 
-    if (!Array.isArray(items) || items.length === 0) {
-      const qParams = new URLSearchParams({
-        q: `${cleanTitle} ${primaryArtist}`,
-      });
-      res = await fetch(`https://lrclib.net/api/search?${qParams.toString()}`);
-      items = res.ok ? await res.json() : [];
-    }
-
-    // Helper to check for Devanagari script
-    const hasHindi = (text: string) => /[\u0900-\u097F]/.test(text);
-
-    let verifiedItems = Array.isArray(items)
-      ? items.filter((it: any) =>
-          isStrictTrackMatch(
-            String(it?.trackName || it?.name || ''),
-            String(it?.artistName || ''),
-            cleanTitle,
-            primaryArtist
-          )
-        )
-      : [];
-
-    if (verifiedItems.length === 0) {
-      const titleOnlyParams = new URLSearchParams({ q: cleanTitle });
-      const titleRes = await fetch(`https://lrclib.net/api/search?${titleOnlyParams.toString()}`);
-      const titleItems: any[] = titleRes.ok ? await titleRes.json() : [];
-      const combined = [...(Array.isArray(items) ? items : []), ...(Array.isArray(titleItems) ? titleItems : [])];
-      const normTarget = normalizeTrackToken(cleanTitle);
-      verifiedItems = combined.filter((it: any) => {
-        const cTitle = normalizeTrackToken(String(it?.trackName || it?.name || ''));
-        const rawLower = `${it?.trackName || ''} ${it?.artistName || ''}`.toLowerCase();
-        if (rawLower.includes('karaoke') || rawLower.includes('instrumental')) return false;
-        return (
-          Boolean(cTitle) &&
-          (cTitle === normTarget ||
-            (cTitle.includes(normTarget) && normTarget.length >= Math.max(4, Math.floor(cTitle.length * 0.6))) ||
-            (normTarget.includes(cTitle) && cTitle.length >= Math.max(4, Math.floor(normTarget.length * 0.6))))
-        );
-      });
-    }
-
-    if (verifiedItems.length === 0) return null;
-
-    // Sort synced lyric candidates by closest match to the actual audio stream duration
-    const syncedCandidates = verifiedItems.filter(
-      (it: any) => typeof it.syncedLyrics === 'string' && it.syncedLyrics.trim()
+    if (!candidates.length) return null;
+    candidates.sort((a: any, b: any) =>
+      Math.abs(Number(a.duration || targetDuration) - targetDuration) -
+      Math.abs(Number(b.duration || targetDuration) - targetDuration)
     );
-    if (syncedCandidates.length > 0) {
-      syncedCandidates.sort(
-        (a: any, b: any) => {
-          // Heuristic: prioritize Devanagari if present in lyrics (likely Hindi song)
-          const aHasHindi = hasHindi(a.syncedLyrics);
-          const bHasHindi = hasHindi(b.syncedLyrics);
-          if (aHasHindi && !bHasHindi) return -1;
-          if (!aHasHindi && bHasHindi) return 1;
-
-          return Math.abs(Number(a.duration || targetDur) - targetDur) -
-            Math.abs(Number(b.duration || targetDur) - targetDur);
-        }
-      );
-      const parsed = parseLrcLyrics(syncedCandidates[0].syncedLyrics);
-      if (parsed.length >= 3) {
-        clientLyricsCache.set(cacheKey, parsed);
-        return parsed;
-      }
-    }
-
-    const matchWithPlain = verifiedItems.find(
-      (it: any) => typeof it.plainLyrics === 'string' && it.plainLyrics.trim()
-    );
-    if (matchWithPlain?.plainLyrics) {
-      const mapped = mapPlainToLyrics(matchWithPlain.plainLyrics);
-      if (mapped) {
-        clientLyricsCache.set(cacheKey, mapped);
-        return mapped;
-      }
-    }
-    return null;
+    const parsed = parseLrcLyrics(candidates[0].syncedLyrics);
+    if (parsed.length < 3) return null;
+    clientLyricsCache.set(cacheKey, parsed);
+    return parsed;
   } catch {
     return null;
   }
