@@ -811,6 +811,7 @@ export default function App() {
       setIsSyncing(false);
       if (reqId !== trackRequestIdRef.current) return;
       if (realTracks.length > 0) {
+        setSpotifyIsPlaying(false);
         setPlaylists((prev) => prev.map((item) => item.id === pl.id
           ? { ...item, tracks: realTracks, trackCount: item.trackCount || realTracks.length }
           : item));
@@ -847,11 +848,13 @@ export default function App() {
   const handleSearchSongs = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!searchQuery.trim()) return;
+    const reqId = ++trackRequestIdRef.current;
     setIsSearching(true);
     setSearchResults([]);
     try {
       if (searchType === 'track') {
         const results = await searchSpotifyCatalog(searchQuery);
+        if (reqId !== trackRequestIdRef.current) return;
         if (results.length > 0) {
           synthEngine.stop();
           setIsPlaying(false);
@@ -863,12 +866,13 @@ export default function App() {
         }
       } else {
         const results = await searchSpotifyPlaylists(searchQuery);
+        if (reqId !== trackRequestIdRef.current) return;
         setSearchResults(results);
       }
     } catch (err) {
       console.error('Search failed', err);
     } finally {
-      setIsSearching(false);
+      if (reqId === trackRequestIdRef.current) setIsSearching(false);
     }
   };
 
