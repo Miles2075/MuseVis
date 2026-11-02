@@ -717,7 +717,7 @@ export default function App() {
         }
 
         setProgress((prev) => {
-          const next = prev + 0.08;
+          const next = prev + 0.05;
           if (next >= currentTrack.duration) {
             handleNextTrack();
             return 0;
@@ -770,6 +770,10 @@ export default function App() {
 
   // Read Spotify's now-playing metadata without mirroring its audio, timeline, or lyrics into MuseVis.
   const syncTrackWithSpotify = async (manualTrigger = false) => {
+    if (isPlaying) {
+      if (manualTrigger) setAuthNotice('Pause MuseVis Studio playback before switching the active display to Spotify metadata.');
+      return;
+    }
     const liveState = await fetchSpotifyLivePlayerState();
     if (liveState?.track) {
       setSpotifyDeviceName(liveState.deviceName || null);
@@ -813,6 +817,7 @@ export default function App() {
           ? { ...item, tracks: realTracks, trackCount: item.trackCount || realTracks.length }
           : item));
         setTracks(realTracks);
+        setSpotifyIsPlaying(false);
         setCurrentTrackIndex(0);
         setProgress(0);
         synthEngine.stop();
@@ -1188,6 +1193,7 @@ export default function App() {
     await safeJsonFetch('/api/spotify/logout', { method: 'POST' });
     synthEngine.stop();
     setIsPlaying(false);
+    setSpotifyIsPlaying(false);
     setSpotifyConnected(false);
     setSpotifyUser(null);
     setPlaylists([]);
@@ -1231,7 +1237,7 @@ export default function App() {
     const target = tracks[index];
     if (!target) return;
     lastLocalControlTimeRef.current = Date.now();
-    ++trackRequestIdRef.current;
+    const reqId = ++trackRequestIdRef.current;
     setCurrentTrackIndex(index);
     setProgress(0);
     setCustomPalette(null);
@@ -1243,7 +1249,9 @@ export default function App() {
         let uri = target.spotifyUri;
         if (!uri) uri = (await resolveSpotifyTrackUri(target.title, target.artist, target.spotifyUri)) || undefined;
         if (uri) {
+          if (reqId !== trackRequestIdRef.current) return;
           const ok = await controlSpotifyRemotePlayer('play', { trackUri: uri, deviceId: sdkDeviceId || undefined });
+          if (reqId !== trackRequestIdRef.current) return;
           setSpotifyIsPlaying(Boolean(ok));
           if (!ok) setAuthNotice('Spotify track selected. Start playback on an active Spotify device.');
         } else {
@@ -1279,8 +1287,7 @@ export default function App() {
     });
 
     scored.sort((a, b) => b.score - a.score);
-    const topCandidates = scored.slice(0, 3);
-    return topCandidates[Math.floor(Math.random() * topCandidates.length)].index;
+    return scored[0].index;
   };
 
   const handleNextTrack = () => {
@@ -1298,6 +1305,7 @@ export default function App() {
   };
 
   const seekPlayback = (newSec: number, commitImmediately = true) => {
+    if (currentTrack.platform === 'Spotify') return;
     lastLocalControlTimeRef.current = Date.now();
     // Leave at least 1.5s margin from the end when scrubbing so dragging to the right edge never triggers a track skip
     const maxSafeSeek = Math.max(1, currentTrack.duration - 1.5);
@@ -1309,7 +1317,6 @@ export default function App() {
       seekCommitTimerRef.current = null;
     }
 
-    if (currentTrack.platform === 'Spotify') return;
     const commitAudioSeek = () => {
       synthEngine.seek(clamped);
       window.setTimeout(() => {
@@ -1361,6 +1368,7 @@ export default function App() {
   const handleStudioFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    ++trackRequestIdRef.current;
     if (!file.type.startsWith('audio/')) {
       setAuthNotice('Choose an audio file (MP3, WAV, M4A, OGG, or another browser-supported format).');
       event.target.value = '';
@@ -2303,7 +2311,7 @@ export default function App() {
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-xs font-mono tabular-nums text-slate-400 w-9 text-right">
-                {formatTime(progress)}
+                {currentTrack.platform === 'Spotify' ? '—' : formatTime(progress)}
               </span>
               <input
                 type="range"
